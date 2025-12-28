@@ -1,0 +1,15 @@
+idf_component_register(
+    SRCS 
+        "main.c"
+        "wifi_credentials.c"
+        "wifi_manager.c"
+        "wifi_provisioning.c"
+        "adc_manager.c"
+        "battery_monitor.c"
+        "soil_moisture.c"
+        "mqtt_publisher.c"
+        "factory_reset.c"
+    INCLUDE_DIRS 
+        "."
+        "../include"
+)

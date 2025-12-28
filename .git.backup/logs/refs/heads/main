@@ -1,0 +1,7 @@
+0000000000000000000000000000000000000000 e22ef4b41646e6c32a2bc69bf518a29c02f30bf4 Lino Steenkamp <lino@steenkamps.org> 1766556599 +0200	commit (initial): initial
+e22ef4b41646e6c32a2bc69bf518a29c02f30bf4 71e8b589a7214dd4ed2c289730aaa52f342b97c8 Lino Steenkamp <lino@steenkamps.org> 1766575712 +0200	commit: updated to use wifi provisioning
+71e8b589a7214dd4ed2c289730aaa52f342b97c8 94cc5b7385f3bb6b668fa8827e974fc8c8ef08c6 Lino Steenkamp <lino@steenkamps.org> 1766828083 +0200	commit: moisture sensor implemented
+94cc5b7385f3bb6b668fa8827e974fc8c8ef08c6 c0a6f33ce36e0e1367cd356f9b1e3f3369cd1327 Lino Steenkamp <lino@steenkamps.org> 1766828438 +0200	commit: Updated Project name
+c0a6f33ce36e0e1367cd356f9b1e3f3369cd1327 93052345849ec33437f7ef6bd40681cf97ef219a Lino Steenkamp <lino@steenkamps.org> 1766829932 +0200	commit: implemented deep sleep
+93052345849ec33437f7ef6bd40681cf97ef219a 0bdd6ed1bd43d9dcbf8edb2ae0b7036d140d671f Lino Steenkamp <lino@steenkamps.org> 1766914211 +0200	commit: removed online message
+0bdd6ed1bd43d9dcbf8edb2ae0b7036d140d671f 9050d63d63100c3433299699e4c00e20ccf921f0 Lino Steenkamp <lino@steenkamps.org> 1766914941 +0200	commit: removed passwords from main.c

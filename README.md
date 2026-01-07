@@ -169,7 +169,7 @@ Edit [src/main.c](src/main.c):
 ```c
 #define MQTT_BROKER_URI      "mqtt://499.steenkamps.org"
 #define MQTT_USERNAME        "mqtt"
-#define MQTT_PASSWORD        "2tVEquV2aaUm"
+#define MQTT_PASSWORD        "password"
 #define DEFAULT_DEVICE_ID    "sensor02"
 #define DEEP_SLEEP_INTERVAL_SEC  3600  // Wake every 1 hour (3600 seconds)
 ```

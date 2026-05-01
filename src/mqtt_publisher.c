@@ -17,12 +17,8 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
         case MQTT_EVENT_CONNECTED:
             ESP_LOGI(TAG, "MQTT connected");
             mqtt_connected = true;
-            // Publish online status
-            // if (client && base_topic) {
-            //     esp_mqtt_client_publish(client, base_topic, "online", 0, 1, 0);
-            // }
-            // break;
-            
+            break;
+
         case MQTT_EVENT_DISCONNECTED:
             ESP_LOGI(TAG, "MQTT disconnected");
             mqtt_connected = false;

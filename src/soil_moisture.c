@@ -55,8 +55,8 @@ static const char *TAG = "SOIL_MOISTURE";
 // Update these values for accurate moisture percentage readings.
 // See SOIL_MOISTURE_SETUP.md for calibration procedure.
 
-#define SENSOR_DRY_MV         2950   ///< Voltage in air (dry) - typically 2500-3000 mV
-#define SENSOR_WET_MV         851    ///< Voltage in water (wet) - typically 1000-1500 mV
+#define SENSOR_DRY_MV         2837   ///< Voltage in air (dry) — calibrated 2026-05-01 (avg of 134 samples)
+#define SENSOR_WET_MV         470    ///< Voltage in water (wet) — calibrated 2026-05-01 (avg of 6 samples, range 385-396)
 
 // Static module state
 static adc_cali_handle_t cali_handle = NULL;  ///< ADC calibration handle from adc_manager

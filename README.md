@@ -182,6 +182,32 @@ Edit [src/main.c](src/main.c):
 - 7200 seconds = 2 hours (extended battery life)
 - 14400 seconds = 4 hours (maximum battery life)
 
+### Disabling Deep Sleep for Testing
+
+For local development you can disable deep sleep entirely so the device stays awake and re-publishes telemetry every few seconds — keeping WiFi and MQTT alive between reads.
+
+Uncomment the build flag in [platformio.ini](platformio.ini):
+
+```ini
+[env:dfrobot_firebeetle2_esp32c6]
+board = dfrobot_firebeetle2_esp32c6
+build_flags = -DDISABLE_DEEP_SLEEP
+```
+
+Then rebuild and flash:
+
+```shell
+$ pio run --target upload --target monitor
+```
+
+Behavior with the flag set:
+- Full init runs once (WiFi → MQTT → first publish)
+- Device then loops `publish_telemetry_once()` every `TEST_PUBLISH_INTERVAL_MS` (default 5000 ms, defined in [src/main.c](src/main.c))
+- Factory reset (GPIO 20, 5 s hold) still works
+- No "Entering deep sleep" log line, no reboot between cycles
+
+Re-comment the line and re-flash to restore production deep-sleep behavior. The flag is orthogonal to `DEEP_SLEEP_INTERVAL_SEC` — both can be tuned independently.
+
 ### Soil Moisture Sensor Calibration
 
 Edit [src/soil_moisture.c](src/soil_moisture.c):

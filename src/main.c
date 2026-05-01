@@ -64,7 +64,7 @@ static char device_id_buffer[33] = {0};
 
 #define MQTT_BASE_TOPIC      MQTT_TOPIC_PREFIX           ///< Base topic (deprecated, uses prefix + device_id)x + device_id)
 #define MQTT_KEEPALIVE_SEC   10                          ///< MQTT keepalive interval in seconds
-#define DEFAULT_DEVICE_ID    "sensor02"                  ///< Fallback device ID if not provisioned
+#define DEFAULT_DEVICE_ID    "tree01"                    ///< Fallback device ID if not provisioned
 #define WIFI_TIMEOUT_SEC     30                          ///< WiFi connection timeout before retry
 #define MQTT_WAIT_MS         3000                        ///< Time to wait for MQTT connection (milliseconds)
 #define PUBLISH_WAIT_MS      2000                        ///< Time to wait after publishing before sleep (milliseconds)
@@ -72,6 +72,10 @@ static char device_id_buffer[33] = {0};
 // Deep Sleep Configuration
 #define DEEP_SLEEP_INTERVAL_SEC  3600                    ///< Deep sleep duration in seconds (3600 = 1 hour)
 #define uS_TO_S_FACTOR          1000000ULL               ///< Conversion factor for microseconds to seconds
+
+#ifdef DISABLE_DEEP_SLEEP
+#define TEST_PUBLISH_INTERVAL_MS 5000                    ///< Test-mode re-publish cadence
+#endif
 
 // ============================================================================
 // System Initialization
@@ -565,8 +569,17 @@ void app_main(void) {
         ESP_LOGW(TAG, "Telemetry publish failed, but continuing to sleep");
     }
     
+#ifdef DISABLE_DEEP_SLEEP
+    ESP_LOGW(TAG, "DISABLE_DEEP_SLEEP set - looping publish every %d ms", TEST_PUBLISH_INTERVAL_MS);
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(TEST_PUBLISH_INTERVAL_MS));
+        factory_reset_check();
+        publish_telemetry_once();
+    }
+#else
     // Step 5: Enter deep sleep
     enter_deep_sleep(DEEP_SLEEP_INTERVAL_SEC);
-    
+
     // This line is never reached - device enters deep sleep
+#endif
 }

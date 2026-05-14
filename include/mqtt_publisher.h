@@ -43,4 +43,12 @@ bool mqtt_publisher_is_connected(void);
  */
 esp_err_t mqtt_publisher_publish_telemetry(float battery_voltage, float soil_moisture, const char *device_name);
 
+/**
+ * @brief Stop and destroy the MQTT client
+ *
+ * Safe to call whether or not init succeeded. Use before entering deep sleep
+ * so the broker connection is closed cleanly.
+ */
+void mqtt_publisher_stop(void);
+
 #endif // MQTT_PUBLISHER_H

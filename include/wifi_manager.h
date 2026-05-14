@@ -29,4 +29,12 @@ bool wifi_manager_is_connected(void);
  */
 bool wifi_manager_wait_connected(int timeout_sec);
 
+/**
+ * @brief Stop and deinitialize the WiFi station
+ *
+ * Safe to call whether or not init succeeded. Use before entering deep sleep
+ * so the radio is cleanly powered down.
+ */
+void wifi_manager_stop(void);
+
 #endif // WIFI_MANAGER_H

@@ -37,6 +37,8 @@
 #include "nvs_flash.h"
 #include "esp_netif.h"
 #include "esp_event.h"
+#include "driver/gpio.h"
+#include "driver/rtc_io.h"
 
 // Module interfaces following SOLID principles
 #include "wifi_credentials.h"
@@ -68,6 +70,7 @@ static char device_id_buffer[33] = {0};
 #define WIFI_TIMEOUT_SEC     30                          ///< WiFi connection timeout before retry
 #define MQTT_WAIT_MS         3000                        ///< Time to wait for MQTT connection (milliseconds)
 #define PUBLISH_WAIT_MS      2000                        ///< Time to wait after publishing before sleep (milliseconds)
+#define PROVISIONING_TIMEOUT_SEC 600                     ///< Max time to keep SoftAP up before giving up and sleeping (10 min)
 
 // Deep Sleep Configuration
 #define DEEP_SLEEP_INTERVAL_SEC  3600                    ///< Deep sleep duration in seconds (3600 = 1 hour)
@@ -192,23 +195,33 @@ static esp_err_t init_system(void) {
  * @note Device automatically restarts after provisioning
  * @note Will not return - device restarts in this function
  */
-static void handle_provisioning(void) {
+static esp_err_t handle_provisioning(void) {
     ESP_LOGI(TAG, "Starting provisioning mode");
-    
+
     if (wifi_provisioning_start() != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start provisioning");
-        return;
+        return ESP_FAIL;
     }
-    
-    // Wait for provisioning to complete
-    ESP_LOGI(TAG, "Waiting for user to configure WiFi...");
-    while (!wifi_provisioning_is_complete()) {
+
+    // Wait for provisioning to complete OR timeout. SoftAP draws ~100+ mA so we
+    // refuse to sit here indefinitely — give the user 10 min then deep-sleep.
+    ESP_LOGI(TAG, "Waiting for user to configure WiFi (timeout %d s)...", PROVISIONING_TIMEOUT_SEC);
+    int elapsed = 0;
+    while (!wifi_provisioning_is_complete() && elapsed < PROVISIONING_TIMEOUT_SEC) {
         vTaskDelay(pdMS_TO_TICKS(1000));
+        elapsed++;
     }
-    
+
+    if (!wifi_provisioning_is_complete()) {
+        ESP_LOGW(TAG, "Provisioning timed out — stopping SoftAP and sleeping until next wake");
+        wifi_provisioning_stop();
+        return ESP_FAIL;
+    }
+
     ESP_LOGI(TAG, "Provisioning complete, restarting...");
     vTaskDelay(pdMS_TO_TICKS(2000));
     esp_restart();
+    return ESP_OK;  // not reached
 }
 
 // ============================================================================
@@ -238,27 +251,28 @@ static esp_err_t setup_wifi(void) {
     // Check if device is provisioned
     if (!wifi_credentials_is_provisioned()) {
         ESP_LOGI(TAG, "Device not provisioned");
-        handle_provisioning();
-        // Will restart after provisioning, so this line won't be reached
-        return ESP_FAIL;
+        // handle_provisioning() either esp_restart()s on success or returns
+        // ESP_FAIL on timeout. In both cases we just bubble the failure up so
+        // the caller deep-sleeps; we never wipe credentials here.
+        return handle_provisioning();
     }
-    
+
     // Initialize WiFi with stored credentials
     esp_err_t err = wifi_manager_init_sta();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize WiFi");
         return err;
     }
-    
-    // Wait for connection
+
+    // Wait for connection — on transient failure (router rebooting, rain
+    // attenuating 2.4 GHz, AP overloaded) we MUST NOT wipe credentials. Just
+    // stop the radio and sleep; next wake retries with the same credentials.
     if (!wifi_manager_wait_connected(WIFI_TIMEOUT_SEC)) {
-        ESP_LOGE(TAG, "WiFi connection failed, clearing credentials and restarting");
-        wifi_credentials_clear();
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        esp_restart();
+        ESP_LOGW(TAG, "WiFi connection failed — will retry on next wake");
+        wifi_manager_stop();
         return ESP_FAIL;
     }
-    
+
     ESP_LOGI(TAG, "WiFi connected successfully");
     return ESP_OK;
 }
@@ -346,13 +360,36 @@ static esp_err_t setup_mqtt(void) {
  */
 static void enter_deep_sleep(uint32_t seconds) {
     ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "Entering deep sleep for %lu seconds (%lu minutes)", 
+    ESP_LOGI(TAG, "Entering deep sleep for %lu seconds (%lu minutes)",
              seconds, seconds / 60);
     ESP_LOGI(TAG, "Device will wake and publish again at next interval");
     ESP_LOGI(TAG, "========================================");
-    
+
+    // Clean radio/network teardown so we don't sleep with a half-open MQTT
+    // session or with the WiFi modem still powered. Both helpers are no-ops
+    // if their subsystems were never started.
+    mqtt_publisher_stop();
+    wifi_manager_stop();
+    wifi_provisioning_stop();
+
+    // Drop the factory-reset pull-up before sleep. The pin is wired to GND via
+    // a momentary switch; with the internal ~45 kΩ pull-up active we'd leak
+    // ~75 µA continuously if the switch is ever held. GPIO 20 is not RTC-
+    // capable on C6 so we just disable the pull and let it float.
+    gpio_set_pull_mode(GPIO_NUM_20, GPIO_FLOATING);
+
+    // Isolate the analog input pins (battery on GPIO 0, soil AOUT on GPIO 2)
+    // so the digital pads don't leak through pull resistors in sleep.
+    rtc_gpio_isolate(GPIO_NUM_0);
+    rtc_gpio_isolate(GPIO_NUM_2);
+
     // Configure wake timer
     esp_sleep_enable_timer_wakeup(seconds * uS_TO_S_FACTOR);
+
+    // Hold the soil-sensor power pin LOW across deep sleep so the sensor stays off.
+    // On C6, per-pin hold (gpio_hold_en) persists through deep sleep on its own —
+    // the chip uses SOC_GPIO_SUPPORT_HOLD_SINGLE_IO_IN_DSLP, so no global enable is needed.
+    gpio_hold_en(GPIO_NUM_3);
     
     // Optional: Print wake time for debugging
     int64_t now_us = esp_timer_get_time();

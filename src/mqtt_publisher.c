@@ -77,6 +77,17 @@ bool mqtt_publisher_is_connected(void) {
     return mqtt_connected;
 }
 
+void mqtt_publisher_stop(void) {
+    if (!client) {
+        return;
+    }
+    ESP_LOGI(TAG, "Stopping MQTT client");
+    esp_mqtt_client_stop(client);
+    esp_mqtt_client_destroy(client);
+    client = NULL;
+    mqtt_connected = false;
+}
+
 esp_err_t mqtt_publisher_publish_telemetry(float battery_voltage, float soil_moisture, const char *device_name) {
     if (!client || !mqtt_connected) {
         ESP_LOGW(TAG, "MQTT not connected, skipping publish");

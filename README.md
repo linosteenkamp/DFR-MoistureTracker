@@ -48,7 +48,8 @@ The device uses ESP32's deep sleep mode for maximum battery efficiency:
 
 - **Board**: DFRobot FireBeetle 2 ESP32-C6
 - **Battery Monitoring**: GPIO 0 (ADC1 Channel 0) with 2:1 voltage divider
-- **Soil Moisture Sensor**: GPIO 1 (ADC1 Channel 1) - DFRobot Capacitive Sensor
+- **Soil Moisture AOUT**: GPIO 2 (ADC1 Channel 2) — DFRobot Capacitive Sensor analog signal (yellow)
+- **Soil Moisture VCC**: GPIO 3 — sensor power, switched by firmware (red)
 - **Factory Reset Button**: GPIO 20 to GND (internal pull-up enabled)
 
 ### Wiring Diagram
@@ -58,10 +59,10 @@ FireBeetle 2 ESP32-C6
 ┌─────────────────────┐
 │                     │
 │  GPIO 0 (ADC1_CH0) ─┼─→ Battery Voltage (2:1 divider)
-│  GPIO 1 (ADC1_CH1) ─┼─→ Soil Moisture Sensor (AOUT)
+│  GPIO 2 (ADC1_CH2) ─┼─→ Soil Moisture Sensor AOUT (Yellow)
+│  GPIO 3            ─┼─→ Soil Moisture Sensor VCC (Red) — switched
 │  GPIO 20           ─┼─→ Factory Reset Button → GND
 │                     │
-│  3V3               ─┼─→ Sensor VCC (Red)
 │  GND               ─┼─→ Sensor GND (Black), Button
 │                     │
 └─────────────────────┘
@@ -257,7 +258,8 @@ Both battery monitor and soil moisture sensor share ADC1 through the ADC manager
 | Function | GPIO | ADC Channel | Notes |
 |----------|------|-------------|-------|
 | Battery Monitor | GPIO 0 | ADC1_CH0 | Built-in voltage divider (2:1) |
-| Soil Moisture | GPIO 1 | ADC1_CH1 | DFRobot capacitive sensor |
+| Soil Moisture AOUT | GPIO 2 | ADC1_CH2 | DFRobot capacitive sensor analog signal |
+| Soil Moisture VCC | GPIO 3 | - | Switched power — HIGH during read, held LOW in sleep |
 | Factory Reset | GPIO 20 | - | Button to GND, 5s hold |
 
 ### Default Values

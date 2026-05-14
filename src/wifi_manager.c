@@ -94,6 +94,16 @@ bool wifi_manager_is_connected(void) {
     return wifi_connected;
 }
 
+void wifi_manager_stop(void) {
+    ESP_LOGI(TAG, "Stopping WiFi");
+    esp_event_handler_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler);
+    esp_event_handler_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler);
+    esp_wifi_disconnect();
+    esp_wifi_stop();
+    esp_wifi_deinit();
+    wifi_connected = false;
+}
+
 bool wifi_manager_wait_connected(int timeout_sec) {
     ESP_LOGI(TAG, "Waiting for WiFi connection (timeout: %d seconds)", timeout_sec);
     

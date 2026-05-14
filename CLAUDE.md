@@ -67,7 +67,7 @@ ESP32-C6 ADC units **cannot be initialized more than once**. `adc_manager` owns 
 
 - `adc_manager_init()` — called first in `init_system()`
 - `adc_manager_get_handle()` — used by both battery monitor and soil moisture
-- Adding a third ADC sensor: use `ADC_CHANNEL_2` (or higher) via the same shared handle — do not create a second unit
+- Adding a third ADC sensor: use `ADC_CHANNEL_4` (or higher, see `SOIL_MOISTURE_SETUP.md` for free channels) via the same shared handle — do not create a second unit
 
 ### Module Responsibilities
 
@@ -78,7 +78,7 @@ ESP32-C6 ADC units **cannot be initialized more than once**. `adc_manager` owns 
 | `wifi_manager` | `src/wifi_manager.c` | WiFi STA connection and status |
 | `wifi_provisioning` | `src/wifi_provisioning.c` | SoftAP (`FireBeetle_C6_Prov`) + HTTP server at 192.168.4.1 |
 | `battery_monitor` | `src/battery_monitor.c` | ADC1 CH0 (GPIO 0) — 2:1 voltage divider |
-| `soil_moisture` | `src/soil_moisture.c` | ADC1 CH1 (GPIO 1) — DFRobot capacitive sensor |
+| `soil_moisture` | `src/soil_moisture.c` | ADC1 CH2 (GPIO 2) for AOUT, GPIO 3 as switched VCC — sensor is only powered during read |
 | `mqtt_publisher` | `src/mqtt_publisher.c` | MQTT client lifecycle and JSON telemetry |
 | `factory_reset` | `src/factory_reset.c` | GPIO 20 button — 5-second hold clears NVS and restarts |
 
@@ -95,11 +95,11 @@ ESP32-C6 ADC units **cannot be initialized more than once**. `adc_manager` owns 
 ### Soil Moisture Calibration (`src/soil_moisture.c`)
 
 ```c
-#define SENSOR_DRY_MV   2800   // ADC mV reading in open air
-#define SENSOR_WET_MV   1200   // ADC mV reading fully submerged
+#define SENSOR_DRY_MV   2752   // ADC mV reading in open air
+#define SENSOR_WET_MV   223    // ADC mV reading fully submerged
 ```
 
-See `SOIL_MOISTURE_SETUP.md` for the calibration procedure.
+The sensor is powered from GPIO 3 (not the 3V3 rail), which sags slightly under load — recalibrate after any wiring change. See `SOIL_MOISTURE_SETUP.md` for the procedure.
 
 ## Adding a New Sensor
 

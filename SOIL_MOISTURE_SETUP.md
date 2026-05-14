@@ -8,18 +8,22 @@ Connect the DFRobot Waterproof Capacitive Soil Moisture Sensor 2 to your ESP32-C
 
 | Sensor Pin | ESP32-C6 Pin | Description |
 |------------|--------------|-------------|
-| VCC (Red)  | 3V3          | Power supply (3.3V) |
+| VCC (Red)  | GPIO3        | Power switched by firmware — HIGH during read, LOW (held) during deep sleep |
 | GND (Black)| GND          | Ground |
-| AOUT (Yellow) | GPIO1 (ADC1_CH1) | Analog output signal |
+| AOUT (Yellow) | GPIO2 (ADC1_CH2) | Analog output signal |
 
-**Note:** The default configuration uses GPIO1 (ADC1 Channel 1). If you need to use a different GPIO pin, modify `SOIL_ADC_CHAN` in [src/soil_moisture.c](src/soil_moisture.c).
+**Why GPIO3 for VCC:** the DFRobot capacitive sensor draws ~5 mA whenever powered. Wired to the 3V3 rail it would draw continuously through deep sleep (~120 mAh/day). Driving it from a GPIO lets the firmware power the sensor only during the ~150 ms warm-up + sample window each wake. `gpio_hold_en()` plus `gpio_deep_sleep_hold_en()` lock the pin LOW through sleep.
 
-### Available ADC Pins on ESP32-C6
+**Note:** To re-pin, change `SOIL_ADC_CHAN` and `SOIL_PWR_GPIO` in [src/soil_moisture.c](src/soil_moisture.c), and update the matching `gpio_hold_en()` call in `enter_deep_sleep()` in [src/main.c](src/main.c).
+
+### Available ADC Pins on ESP32-C6 (ADC1 only)
 - GPIO0 → ADC1_CH0 (used by battery monitor)
-- GPIO1 → ADC1_CH1 (used by soil moisture sensor)
-- GPIO2 → ADC1_CH2
-- GPIO3 → ADC1_CH3
-- GPIO4 → ADC1_CH4
+- GPIO1 → ADC1_CH1 (free)
+- GPIO2 → ADC1_CH2 (used by soil moisture AOUT)
+- GPIO3 → ADC1_CH3 (used as soil sensor power switch, not as ADC)
+- GPIO4 → ADC1_CH4 (free)
+- GPIO5 → ADC1_CH5 (free)
+- GPIO6 → ADC1_CH6 (free)
 
 ## Sensor Calibration
 

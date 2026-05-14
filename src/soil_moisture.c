@@ -36,6 +36,9 @@
 #include "esp_adc/adc_oneshot.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_log.h"
+#include "driver/gpio.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "SOIL_MOISTURE";
 
@@ -44,9 +47,11 @@ static const char *TAG = "SOIL_MOISTURE";
 // ============================================================================
 // Adjust these values based on your hardware setup and calibration
 
-#define SOIL_ADC_CHAN         ADC_CHANNEL_1    ///< GPIO1 = ADC1_CH1 (change if different wiring)
+#define SOIL_ADC_CHAN         ADC_CHANNEL_2    ///< GPIO2 = ADC1_CH2 (AOUT / yellow)
 #define ADC_ATTEN             ADC_ATTEN_DB_12  ///< 12dB attenuation for 0-3.1V range
 #define SAMPLE_COUNT          10               ///< Number of ADC samples to average (noise reduction)
+#define SOIL_PWR_GPIO         GPIO_NUM_3       ///< GPIO3 = sensor VCC (red) — driven HIGH only during read
+#define SOIL_WARMUP_MS        150              ///< Settle time after powering sensor before sampling
 
 // ============================================================================
 // Calibration Values - CUSTOMIZE THESE FOR YOUR SENSOR
@@ -55,8 +60,8 @@ static const char *TAG = "SOIL_MOISTURE";
 // Update these values for accurate moisture percentage readings.
 // See SOIL_MOISTURE_SETUP.md for calibration procedure.
 
-#define SENSOR_DRY_MV         2747   ///< Voltage in air (dry) — calibrated 2026-05-03 for tree02 probe (avg of 92 samples)
-#define SENSOR_WET_MV         423    ///< Voltage in water (wet) — calibrated 2026-05-03 for tree02 probe (avg of 8 samples, range 404-436)
+#define SENSOR_DRY_MV         2752   ///< Voltage in air (dry) — calibrated 2026-05-14 after rewire to GPIO 2 AOUT + GPIO 3 switched VCC
+#define SENSOR_WET_MV         223    ///< Voltage in water (wet) — calibrated 2026-05-14 after rewire to GPIO 2 AOUT + GPIO 3 switched VCC
 
 // Static module state
 static adc_cali_handle_t cali_handle = NULL;  ///< ADC calibration handle from adc_manager
@@ -95,6 +100,24 @@ esp_err_t soil_moisture_init(void) {
     }
 
     ESP_LOGI(TAG, "Initializing soil moisture sensor");
+
+    // Release any deep-sleep hold left on the power pin from the previous wake
+    gpio_hold_dis(SOIL_PWR_GPIO);
+
+    // Configure sensor power pin as output, idle LOW (sensor off)
+    gpio_config_t pwr_conf = {
+        .pin_bit_mask = (1ULL << SOIL_PWR_GPIO),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    esp_err_t pwr_err = gpio_config(&pwr_conf);
+    if (pwr_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to configure power GPIO %d: %s", SOIL_PWR_GPIO, esp_err_to_name(pwr_err));
+        return pwr_err;
+    }
+    gpio_set_level(SOIL_PWR_GPIO, 0);
 
     // Get shared ADC handle
     adc_oneshot_unit_handle_t adc_handle = adc_manager_get_handle();
@@ -167,10 +190,14 @@ float soil_moisture_read_voltage(void) {
         return 0.0f;
     }
 
+    // Power up the sensor and let it settle before sampling
+    gpio_set_level(SOIL_PWR_GPIO, 1);
+    vTaskDelay(pdMS_TO_TICKS(SOIL_WARMUP_MS));
+
     // Take multiple samples and average to reduce noise
     uint32_t value_sum = 0;
     int valid_samples = 0;
-    
+
     for (int i = 0; i < SAMPLE_COUNT; i++) {
         int raw_value = 0;
         esp_err_t err = adc_oneshot_read(adc_handle, SOIL_ADC_CHAN, &raw_value);
@@ -181,6 +208,9 @@ float soil_moisture_read_voltage(void) {
             ESP_LOGW(TAG, "ADC read failed on sample %d: %s", i, esp_err_to_name(err));
         }
     }
+
+    // Power down the sensor as soon as sampling is done
+    gpio_set_level(SOIL_PWR_GPIO, 0);
 
     if (valid_samples == 0) {
         ESP_LOGE(TAG, "All ADC reads failed");

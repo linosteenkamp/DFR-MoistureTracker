@@ -60,8 +60,8 @@ static const char *TAG = "SOIL_MOISTURE";
 // Update these values for accurate moisture percentage readings.
 // See SOIL_MOISTURE_SETUP.md for calibration procedure.
 
-#define SENSOR_DRY_MV         2752   ///< Voltage in air (dry) — calibrated 2026-05-14 after rewire to GPIO 2 AOUT + GPIO 3 switched VCC
-#define SENSOR_WET_MV         223    ///< Voltage in water (wet) — calibrated 2026-05-14 after rewire to GPIO 2 AOUT + GPIO 3 switched VCC
+#define SENSOR_DRY_MV         2800   ///< Voltage in air (dry) — calibrated 2026-05-17
+#define SENSOR_WET_MV         0      ///< Voltage in water (wet) — calibrated 2026-05-17
 
 // Static module state
 static adc_cali_handle_t cali_handle = NULL;  ///< ADC calibration handle from adc_manager

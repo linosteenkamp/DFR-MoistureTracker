@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "adc_manager.c"
         "battery_monitor.c"
+        "config_portal.c"
         "factory_reset.c"
         "form_parser.c"
         "main.c"

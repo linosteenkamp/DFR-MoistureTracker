@@ -31,6 +31,7 @@
  * @date 2025
  */
 
+#ifndef TEST_HOST
 #include "soil_moisture.h"
 #include "adc_manager.h"
 #include "esp_adc/adc_oneshot.h"
@@ -39,6 +40,22 @@
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#endif
+
+// Pure percentage math, callable from host tests.
+// Linear interpolation between dry (0%) and wet (100%) mV thresholds.
+float soil_moisture_calc_percentage(int raw_mv, int dry_mv, int wet_mv) {
+    if (raw_mv >= dry_mv) return 0.0f;
+    if (raw_mv <= wet_mv) return 100.0f;
+    float span = (float)(dry_mv - wet_mv);
+    if (span <= 0.0f) return 0.0f;
+    float pct = 100.0f * (float)(dry_mv - raw_mv) / span;
+    if (pct < 0.0f) return 0.0f;
+    if (pct > 100.0f) return 100.0f;
+    return pct;
+}
+
+#ifndef TEST_HOST
 
 static const char *TAG = "SOIL_MOISTURE";
 
@@ -284,27 +301,8 @@ float soil_moisture_read_percentage(void) {
     float voltage = soil_moisture_read_voltage();
     int voltage_mV = (int)(voltage * 1000.0f);
 
-    // Convert voltage to percentage using linear interpolation
-    // Lower voltage = more water (higher moisture)
-    // Higher voltage = less water (lower moisture)
-    float percentage;
-    
-    if (voltage_mV >= SENSOR_DRY_MV) {
-        // Sensor is dry (in air)
-        percentage = 0.0f;
-    } else if (voltage_mV <= SENSOR_WET_MV) {
-        // Sensor is fully wet
-        percentage = 100.0f;
-    } else {
-        // Linear interpolation between wet and dry
-        // Invert the scale: lower voltage = higher percentage
-        percentage = 100.0f * (float)(SENSOR_DRY_MV - voltage_mV) / 
-                     (float)(SENSOR_DRY_MV - SENSOR_WET_MV);
-    }
-
-    // Clamp to valid range
-    if (percentage < 0.0f) percentage = 0.0f;
-    if (percentage > 100.0f) percentage = 100.0f;
+    // Convert voltage to percentage using pure math function
+    float percentage = soil_moisture_calc_percentage(voltage_mV, SENSOR_DRY_MV, SENSOR_WET_MV);
 
     ESP_LOGI(TAG, "Moisture: %.1f%% (%.3f V, %d mV)", percentage, voltage, voltage_mV);
 
@@ -338,6 +336,8 @@ esp_err_t soil_moisture_deinit(void) {
     cali_handle = NULL;
     initialized = false;
     ESP_LOGI(TAG, "Soil moisture sensor deinitialized");
-    
+
     return ESP_OK;
 }
+
+#endif // TEST_HOST

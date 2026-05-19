@@ -89,6 +89,7 @@ test_filter = test_calibration_nvs
 
 [env:native]
 platform = native
+framework =
 test_framework = unity
 build_flags = -std=c11 -Wall -Wextra -I include
 test_filter =

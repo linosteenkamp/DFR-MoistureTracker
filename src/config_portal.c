@@ -91,6 +91,18 @@ static const char *html_calibrate =
     "else{alert('Capture both DRY and WET first.');}}"
     "</script></body></html>";
 
+static const char *html_reset_confirm =
+    "<!DOCTYPE html><html><head><title>Factory Reset</title>"
+    "<style>body{font-family:Arial;margin:40px;background:#f0f0f0}"
+    ".c{background:white;padding:30px;border-radius:10px;max-width:400px;margin:auto;text-align:center}"
+    "button{background:#d9534f;color:white;padding:14px;border:none;width:100%;cursor:pointer;font-size:16px;margin:8px 0}"
+    "a{display:block;margin-top:14px}</style></head>"
+    "<body><div class='c'><h2>Factory Reset</h2>"
+    "<p>This wipes WiFi credentials and calibration. Device will restart and ask for setup again.</p>"
+    "<form action='/factory-reset' method='POST'>"
+    "<button type='submit'>Yes, wipe everything</button></form>"
+    "<a href='/'>Cancel</a></div></body></html>";
+
 static esp_err_t root_get(httpd_req_t *req) {
     s_idle_ticks = 0;
     httpd_resp_set_type(req, "text/html");
@@ -189,6 +201,52 @@ static esp_err_t api_calibrate_save(httpd_req_t *req) {
     return httpd_resp_send(req, "{\"ok\":true}", HTTPD_RESP_USE_STRLEN);
 }
 
+static esp_err_t status_get(httpd_req_t *req) {
+    s_idle_ticks = 0;
+    int raw = soil_moisture_read_raw_mv();
+    uint32_t dry = soil_calibration_get_dry_mv();
+    uint32_t wet = soil_calibration_get_wet_mv();
+    uint32_t ts  = soil_calibration_get_cal_ts();
+    float pct = soil_moisture_calc_percentage(raw, (int)dry, (int)wet);
+
+    char body[768];
+    snprintf(body, sizeof(body),
+        "<!DOCTYPE html><html><head><title>Status</title>"
+        "<style>body{font-family:Arial;margin:40px;background:#f0f0f0}"
+        ".c{background:white;padding:30px;border-radius:10px;max-width:480px;margin:auto}"
+        "table{width:100%%}td{padding:6px 0}td.k{color:#666;width:40%%}"
+        "a{display:block;text-align:center;margin-top:14px}</style></head>"
+        "<body><div class='c'><h2>Status</h2><table>"
+        "<tr><td class='k'>DRY mV</td><td>%u</td></tr>"
+        "<tr><td class='k'>WET mV</td><td>%u</td></tr>"
+        "<tr><td class='k'>Last cal (s)</td><td>%u</td></tr>"
+        "<tr><td class='k'>Live mV</td><td>%d</td></tr>"
+        "<tr><td class='k'>Live %%</td><td>%.1f</td></tr>"
+        "</table><a href='/'>Back</a></div></body></html>",
+        (unsigned)dry, (unsigned)wet, (unsigned)ts, raw, pct);
+    httpd_resp_set_type(req, "text/html");
+    return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t factory_reset_get(httpd_req_t *req) {
+    s_idle_ticks = 0;
+    httpd_resp_set_type(req, "text/html");
+    return httpd_resp_send(req, html_reset_confirm, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t factory_reset_post(httpd_req_t *req) {
+    s_idle_ticks = 0;
+    wifi_credentials_clear();
+    soil_calibration_clear();
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_send(req,
+        "<html><body><h1>Wiped. Restarting…</h1></body></html>",
+        HTTPD_RESP_USE_STRLEN);
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    esp_restart();
+    return ESP_OK;
+}
+
 static esp_err_t start_softap(void) {
     s_ap_netif = esp_netif_create_default_wifi_ap();
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
@@ -246,6 +304,13 @@ static esp_err_t start_http(void) {
     httpd_register_uri_handler(s_server, &cal_d);
     httpd_register_uri_handler(s_server, &cal_w);
     httpd_register_uri_handler(s_server, &cal_s);
+
+    httpd_uri_t st_g  = {.uri = "/status",        .method = HTTP_GET,  .handler = status_get};
+    httpd_uri_t fr_g  = {.uri = "/factory-reset", .method = HTTP_GET,  .handler = factory_reset_get};
+    httpd_uri_t fr_p  = {.uri = "/factory-reset", .method = HTTP_POST, .handler = factory_reset_post};
+    httpd_register_uri_handler(s_server, &st_g);
+    httpd_register_uri_handler(s_server, &fr_g);
+    httpd_register_uri_handler(s_server, &fr_p);
 
     return ESP_OK;
 }

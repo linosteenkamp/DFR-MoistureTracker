@@ -3,7 +3,6 @@ idf_component_register(
         "adc_manager.c"
         "battery_monitor.c"
         "config_portal.c"
-        "factory_reset.c"
         "form_parser.c"
         "main.c"
         "mqtt_publisher.c"
@@ -12,7 +11,6 @@ idf_component_register(
         "soil_moisture.c"
         "wifi_credentials.c"
         "wifi_manager.c"
-        "wifi_provisioning.c"
     INCLUDE_DIRS
         "."
         "../include"

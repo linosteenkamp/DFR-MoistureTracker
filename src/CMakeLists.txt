@@ -7,6 +7,7 @@ idf_component_register(
         "main.c"
         "mqtt_publisher.c"
         "nvs_shim_esp.c"
+        "soil_calibration.c"
         "soil_moisture.c"
         "wifi_credentials.c"
         "wifi_manager.c"

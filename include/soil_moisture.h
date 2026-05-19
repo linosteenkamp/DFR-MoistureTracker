@@ -70,4 +70,15 @@ esp_err_t soil_moisture_deinit(void);
  */
 float soil_moisture_calc_percentage(int raw_mv, int dry_mv, int wet_mv);
 
+/**
+ * @brief Read averaged raw sensor value in millivolts.
+ *
+ * Like soil_moisture_read_voltage() but returns the integer mV from
+ * the same 10-sample average. Used by the calibration capture
+ * endpoints in config_portal.
+ *
+ * @return mV (0 if sensor not initialized or all reads fail)
+ */
+int soil_moisture_read_raw_mv(void);
+
 #endif // SOIL_MOISTURE_H

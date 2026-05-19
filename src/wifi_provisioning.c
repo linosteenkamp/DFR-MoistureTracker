@@ -1,5 +1,6 @@
 #include "wifi_provisioning.h"
 #include "wifi_credentials.h"
+#include "form_parser.h"
 #include "esp_wifi.h"
 #include "esp_log.h"
 #include "esp_http_server.h"
@@ -43,49 +44,6 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
-// URL decode helper
-static void url_decode(char *str) {
-    for (int i = 0; str[i]; i++) {
-        if (str[i] == '+') {
-            str[i] = ' ';
-        }
-        // TODO: Handle %XX encoding if needed
-    }
-}
-
-// Parse URL-encoded form data into ssid, password and device_id
-static bool copy_form_field(const char *start, size_t key_len, char *dst, size_t dst_len)
-{
-    start += key_len;
-    const char *end = strchr(start, '&');
-    size_t len = end ? (size_t)(end - start) : strlen(start);
-    if (len >= dst_len) return false;
-    strncpy(dst, start, len);
-    dst[len] = '\0';
-    return true;
-}
-
-static bool parse_form_fields(const char *buf,
-                              char *ssid, size_t ssid_len,
-                              char *password, size_t pass_len,
-                              char *device_id, size_t device_id_len)
-{
-    const char *ssid_start = strstr(buf, "ssid=");
-    const char *pass_start = strstr(buf, "password=");
-    const char *device_id_start = strstr(buf, "device_id=");
-    if (!ssid_start || !pass_start || !device_id_start) {
-        return false;
-    }
-
-    if (!copy_form_field(ssid_start, 5, ssid, ssid_len)) return false;
-    if (!copy_form_field(pass_start, 9, password, pass_len)) return false;
-    if (!copy_form_field(device_id_start, 10, device_id, device_id_len)) return false;
-
-    url_decode(ssid);
-    url_decode(password);
-    url_decode(device_id);
-    return true;
-}
 
 // HTTP POST handler for /save
 static esp_err_t save_post_handler(httpd_req_t *req)
@@ -117,7 +75,12 @@ static esp_err_t save_post_handler(httpd_req_t *req)
     char password[65] = {0};
     char device_id[33] = {0};
 
-    if (!parse_form_fields(buf, ssid, sizeof(ssid), password, sizeof(password), device_id, sizeof(device_id))) {
+    form_field_t fields[] = {
+        {"ssid",      ssid,      sizeof(ssid)},
+        {"password",  password,  sizeof(password)},
+        {"device_id", device_id, sizeof(device_id)},
+    };
+    if (!form_parser_extract(buf, fields, 3)) {
         free(buf);
         ESP_LOGE(TAG, "Failed to parse form fields");
         httpd_resp_send_500(req);

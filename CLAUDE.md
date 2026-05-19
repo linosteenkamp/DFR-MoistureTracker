@@ -76,11 +76,13 @@ ESP32-C6 ADC units **cannot be initialized more than once**. `adc_manager` owns 
 | `adc_manager` | `src/adc_manager.c` | Shared ADC1 handle — must init first |
 | `wifi_credentials` | `src/wifi_credentials.c` | NVS read/write for SSID, password, device ID |
 | `wifi_manager` | `src/wifi_manager.c` | WiFi STA connection and status |
-| `wifi_provisioning` | `src/wifi_provisioning.c` | SoftAP (`FireBeetle_C6_Prov`) + HTTP server at 192.168.4.1 |
 | `battery_monitor` | `src/battery_monitor.c` | ADC1 CH0 (GPIO 0) — 2:1 voltage divider |
 | `soil_moisture` | `src/soil_moisture.c` | ADC1 CH2 (GPIO 2) for AOUT, GPIO 3 as switched VCC — sensor is only powered during read |
 | `mqtt_publisher` | `src/mqtt_publisher.c` | MQTT client lifecycle and JSON telemetry |
-| `factory_reset` | `src/factory_reset.c` | GPIO 20 button — 5-second hold clears NVS and restarts |
+| `soil_calibration` | `src/soil_calibration.c` | NVS-backed runtime dry/wet mV values (namespace `soil_cal`) — sane defaults if missing |
+| `config_portal` | `src/config_portal.c` | SoftAP (`FireBeetle_C6_Prov`) + HTTP portal (WiFi, calibration, status, factory reset) |
+| `form_parser` | `src/form_parser.c` | URL-encoded form field extraction (pure C, host-testable) |
+| `nvs_shim` | `src/nvs_shim_esp.c` | u32 wrapper around ESP NVS for host-testable modules |
 
 ### Key Configuration Constants (`src/main.c`)
 
@@ -92,14 +94,9 @@ ESP32-C6 ADC units **cannot be initialized more than once**. `adc_manager` owns 
 #define PUBLISH_WAIT_MS           2000          // Drain time before sleep
 ```
 
-### Soil Moisture Calibration (`src/soil_moisture.c`)
+### Soil Moisture Calibration
 
-```c
-#define SENSOR_DRY_MV   2752   // ADC mV reading in open air
-#define SENSOR_WET_MV   223    // ADC mV reading fully submerged
-```
-
-The sensor is powered from GPIO 3 (not the 3V3 rail), which sags slightly under load — recalibrate after any wiring change. See `SOIL_MOISTURE_SETUP.md` for the procedure.
+Calibration values are stored per device in NVS namespace `soil_cal` (`dry_mv`, `wet_mv`, `cal_ts`) and captured through the config portal. See [CONFIG_PORTAL.md](CONFIG_PORTAL.md). Defaults (`dry_mv=2800`, `wet_mv=0`) are used when NVS has no calibration.
 
 ## Adding a New Sensor
 
@@ -129,4 +126,4 @@ Defined in `partitions.csv`:
 
 ## Provisioning Flow
 
-On first boot (or after factory reset), device starts SoftAP `FireBeetle_C6_Prov`. Connect to that network and navigate to `http://192.168.4.1` to set SSID, password, and device ID. Credentials persist in NVS across deep sleep cycles.
+On first boot (no WiFi credentials in NVS) **or** when the GPIO7 button is pressed during deep sleep, the device opens SoftAP `FireBeetle_C6_Prov` and serves a config portal at `http://192.168.4.1`. See [CONFIG_PORTAL.md](CONFIG_PORTAL.md) for full documentation.

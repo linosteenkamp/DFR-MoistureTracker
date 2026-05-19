@@ -793,6 +793,7 @@ git commit -m "Add soil_calibration module with NVS-backed runtime values"
 
 **Files:**
 - Create: `test/test_calibration_nvs/test_calibration_nvs.c`
+- Create: `test/test_calibration_nvs/CMakeLists.txt` (ESP-IDF test component registration)
 
 - [ ] **Step 1: Write the on-device test**
 

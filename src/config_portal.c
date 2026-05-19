@@ -6,6 +6,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string.h>
+#include "wifi_credentials.h"
+#include "form_parser.h"
+#include <stdlib.h>
 
 static const char *TAG = "CONFIG_PORTAL";
 static httpd_handle_t s_server = NULL;
@@ -32,10 +35,70 @@ static const char *html_menu =
     "<a class='btn danger' href='/factory-reset'>Factory Reset</a>"
     "</div></body></html>";
 
+static const char *html_wifi_form =
+    "<!DOCTYPE html><html><head><title>WiFi Setup</title>"
+    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<style>body{font-family:Arial;margin:40px;background:#f0f0f0}"
+    ".container{background:white;padding:30px;border-radius:10px;max-width:400px;margin:auto}"
+    "input{width:100%;padding:10px;margin:10px 0;box-sizing:border-box}"
+    "button{background:#4CAF50;color:white;padding:14px;border:none;width:100%;cursor:pointer;font-size:16px}"
+    "a{display:block;text-align:center;margin-top:14px}</style></head>"
+    "<body><div class='container'><h2>WiFi &amp; Device ID</h2>"
+    "<form action='/wifi' method='POST'>"
+    "<label>SSID:</label><input type='text' name='ssid' required>"
+    "<label>Password:</label><input type='password' name='password' required>"
+    "<label>Device ID:</label><input type='text' name='device_id' placeholder='moisture01' required>"
+    "<button type='submit'>Save &amp; Restart</button></form>"
+    "<a href='/'>Back</a></div></body></html>";
+
+static const char *html_wifi_saved =
+    "<!DOCTYPE html><html><body><h1>WiFi saved.</h1>"
+    "<p>Device will restart in 2 seconds.</p></body></html>";
+
 static esp_err_t root_get(httpd_req_t *req) {
     s_idle_ticks = 0;
     httpd_resp_set_type(req, "text/html");
     return httpd_resp_send(req, html_menu, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t wifi_get(httpd_req_t *req) {
+    s_idle_ticks = 0;
+    httpd_resp_set_type(req, "text/html");
+    return httpd_resp_send(req, html_wifi_form, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t wifi_post(httpd_req_t *req) {
+    s_idle_ticks = 0;
+    int total = req->content_len;
+    if (total <= 0 || total > 1024) { httpd_resp_send_500(req); return ESP_FAIL; }
+    char *buf = malloc(total + 1);
+    if (!buf) { httpd_resp_send_500(req); return ESP_FAIL; }
+    int got = 0;
+    while (got < total) {
+        int r = httpd_req_recv(req, buf + got, total - got);
+        if (r <= 0) { free(buf); httpd_resp_send_500(req); return ESP_FAIL; }
+        got += r;
+    }
+    buf[total] = '\0';
+
+    char ssid[33] = {0}, password[65] = {0}, device_id[33] = {0};
+    form_field_t fields[] = {
+        {"ssid",      ssid,      sizeof(ssid)},
+        {"password",  password,  sizeof(password)},
+        {"device_id", device_id, sizeof(device_id)},
+    };
+    bool ok = form_parser_extract(buf, fields, 3);
+    free(buf);
+    if (!ok) { httpd_resp_send_500(req); return ESP_FAIL; }
+
+    if (wifi_credentials_save(ssid, password) != ESP_OK) { httpd_resp_send_500(req); return ESP_FAIL; }
+    if (wifi_credentials_save_device_id(device_id) != ESP_OK) { httpd_resp_send_500(req); return ESP_FAIL; }
+
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_send(req, html_wifi_saved, HTTPD_RESP_USE_STRLEN);
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    esp_restart();
+    return ESP_OK;
 }
 
 static esp_err_t start_softap(void) {
@@ -80,7 +143,12 @@ static esp_err_t start_http(void) {
     };
     httpd_register_uri_handler(s_server, &root);
 
-    // (Other handlers registered in Tasks 9–11.)
+    httpd_uri_t wifi_g = {.uri = "/wifi", .method = HTTP_GET,  .handler = wifi_get,  .user_ctx = NULL};
+    httpd_uri_t wifi_p = {.uri = "/wifi", .method = HTTP_POST, .handler = wifi_post, .user_ctx = NULL};
+    httpd_register_uri_handler(s_server, &wifi_g);
+    httpd_register_uri_handler(s_server, &wifi_p);
+
+    // (Other handlers registered in Tasks 10–11.)
     return ESP_OK;
 }
 

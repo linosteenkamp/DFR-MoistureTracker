@@ -23,9 +23,9 @@
  * 3. Call soil_moisture_read_voltage() for raw voltage
  * 
  * Calibration:
- * - Measure sensor in air (dry) → update SENSOR_DRY_MV
- * - Measure sensor in water (wet) → update SENSOR_WET_MV
- * - See SOIL_MOISTURE_SETUP.md for detailed calibration procedure
+ * - Captured at runtime via the config portal (see CONFIG_PORTAL.md)
+ * - Stored in NVS namespace "soil_cal" and read via soil_calibration_get_*
+ * - Defaults if NVS is empty: dry=2800 mV, wet=0 mV
  * 
  * @author DFRobot Project
  * @date 2025
@@ -242,10 +242,8 @@ int soil_moisture_read_raw_mv(void) {
  * Conversion Process:
  * 1. Read raw voltage using soil_moisture_read_voltage()
  * 2. Convert volts to millivolts
- * 3. Apply linear interpolation:
- *    - If voltage >= SENSOR_DRY_MV → 0% (dry)
- *    - If voltage <= SENSOR_WET_MV → 100% (wet)
- *    - Otherwise: percentage = 100 * (DRY - voltage) / (DRY - WET)
+ * 3. Apply linear interpolation against runtime dry/wet thresholds
+ *    fetched from soil_calibration (see soil_moisture_calc_percentage)
  * 4. Clamp result to 0-100% range
  * 
  * Linear Interpolation Formula:

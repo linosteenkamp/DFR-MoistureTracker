@@ -9,6 +9,7 @@
 
 static const char *TAG = "CONFIG_PORTAL";
 static httpd_handle_t s_server = NULL;
+static esp_netif_t *s_ap_netif = NULL;
 static bool s_should_exit = false;
 static int  s_idle_ticks = 0;
 
@@ -38,7 +39,7 @@ static esp_err_t root_get(httpd_req_t *req) {
 }
 
 static esp_err_t start_softap(void) {
-    esp_netif_create_default_wifi_ap();
+    s_ap_netif = esp_netif_create_default_wifi_ap();
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     esp_err_t err = esp_wifi_init(&cfg);
     if (err != ESP_OK) return err;
@@ -89,6 +90,11 @@ static void stop_server(void) {
         s_server = NULL;
     }
     esp_wifi_stop();
+    esp_wifi_deinit();
+    if (s_ap_netif) {
+        esp_netif_destroy_default_wifi(s_ap_netif);
+        s_ap_netif = NULL;
+    }
 }
 
 esp_err_t config_portal_run(void) {

@@ -9,12 +9,18 @@
 #include "wifi_credentials.h"
 #include "form_parser.h"
 #include <stdlib.h>
+#include "soil_calibration.h"
+#include "soil_moisture.h"
+#include <stdio.h>
+#include "esp_timer.h"
 
 static const char *TAG = "CONFIG_PORTAL";
 static httpd_handle_t s_server = NULL;
 static esp_netif_t *s_ap_netif = NULL;
 static bool s_should_exit = false;
 static int  s_idle_ticks = 0;
+static int  s_pending_dry_mv = -1;
+static int  s_pending_wet_mv = -1;
 
 #define PROV_AP_SSID         "FireBeetle_C6_Prov"
 #define PORTAL_TIMEOUT_SEC   600
@@ -54,6 +60,36 @@ static const char *html_wifi_form =
 static const char *html_wifi_saved =
     "<!DOCTYPE html><html><body><h1>WiFi saved.</h1>"
     "<p>Device will restart in 2 seconds.</p></body></html>";
+
+static const char *html_calibrate =
+    "<!DOCTYPE html><html><head><title>Calibrate</title>"
+    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<style>body{font-family:Arial;margin:40px;background:#f0f0f0}"
+    ".c{background:white;padding:30px;border-radius:10px;max-width:480px;margin:auto}"
+    ".live{font-size:32px;text-align:center;padding:14px;background:#eef;border-radius:6px;margin:14px 0}"
+    "button{background:#4CAF50;color:white;padding:12px;border:none;width:100%;cursor:pointer;font-size:15px;margin:6px 0}"
+    ".captured{padding:8px;background:#dfd;border-radius:4px;text-align:center}"
+    "a{display:block;text-align:center;margin-top:14px}</style></head>"
+    "<body><div class='c'><h2>Calibrate Sensor</h2>"
+    "<div class='live' id='live'>… mV</div>"
+    "<p>1. Hold sensor in <b>open air</b>, then:</p>"
+    "<button onclick='cap(\"dry\")'>Capture DRY</button>"
+    "<div class='captured' id='dry'>not captured</div>"
+    "<p>2. Submerge sensor to MAX line, then:</p>"
+    "<button onclick='cap(\"wet\")'>Capture WET</button>"
+    "<div class='captured' id='wet'>not captured</div>"
+    "<button onclick='save()'>Save &amp; Restart</button>"
+    "<a href='/'>Back</a></div>"
+    "<script>"
+    "async function poll(){try{let r=await fetch('/api/reading');let j=await r.json();"
+    "document.getElementById('live').textContent=j.raw_mv+' mV ('+j.percentage.toFixed(1)+'%)';}catch(e){}}"
+    "setInterval(poll,1000);poll();"
+    "async function cap(k){let r=await fetch('/api/calibrate/'+k,{method:'POST'});let j=await r.json();"
+    "document.getElementById(k).textContent='captured: '+j.mv+' mV';}"
+    "async function save(){let r=await fetch('/api/calibrate/save',{method:'POST'});"
+    "if(r.ok){document.body.innerHTML='<h1>Saved.</h1>';setTimeout(()=>location.href='/',1500);}"
+    "else{alert('Capture both DRY and WET first.');}}"
+    "</script></body></html>";
 
 static esp_err_t root_get(httpd_req_t *req) {
     s_idle_ticks = 0;
@@ -99,6 +135,58 @@ static esp_err_t wifi_post(httpd_req_t *req) {
     vTaskDelay(pdMS_TO_TICKS(2000));
     esp_restart();
     return ESP_OK;
+}
+
+static esp_err_t calibrate_get(httpd_req_t *req) {
+    s_idle_ticks = 0;
+    httpd_resp_set_type(req, "text/html");
+    return httpd_resp_send(req, html_calibrate, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t api_reading_get(httpd_req_t *req) {
+    s_idle_ticks = 0;
+    int raw = soil_moisture_read_raw_mv();
+    uint32_t dry = soil_calibration_get_dry_mv();
+    uint32_t wet = soil_calibration_get_wet_mv();
+    float pct = soil_moisture_calc_percentage(raw, (int)dry, (int)wet);
+
+    char body[160];
+    snprintf(body, sizeof(body),
+        "{\"raw_mv\":%d,\"percentage\":%.1f,\"dry_mv\":%u,\"wet_mv\":%u}",
+        raw, pct, (unsigned)dry, (unsigned)wet);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t api_capture(httpd_req_t *req, int *target) {
+    s_idle_ticks = 0;
+    int mv = soil_moisture_read_raw_mv();
+    *target = mv;
+    char body[40];
+    snprintf(body, sizeof(body), "{\"mv\":%d}", mv);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t api_calibrate_dry(httpd_req_t *req) {
+    return api_capture(req, &s_pending_dry_mv);
+}
+static esp_err_t api_calibrate_wet(httpd_req_t *req) {
+    return api_capture(req, &s_pending_wet_mv);
+}
+
+static esp_err_t api_calibrate_save(httpd_req_t *req) {
+    s_idle_ticks = 0;
+    if (s_pending_dry_mv < 0 || s_pending_wet_mv < 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "capture dry and wet first");
+        return ESP_FAIL;
+    }
+    uint32_t ts = (uint32_t)(esp_timer_get_time() / 1000000);  // seconds since boot
+    bool ok = soil_calibration_save(
+        (uint32_t)s_pending_dry_mv, (uint32_t)s_pending_wet_mv, ts);
+    if (!ok) { httpd_resp_send_500(req); return ESP_FAIL; }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, "{\"ok\":true}", HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t start_softap(void) {
@@ -148,7 +236,17 @@ static esp_err_t start_http(void) {
     httpd_register_uri_handler(s_server, &wifi_g);
     httpd_register_uri_handler(s_server, &wifi_p);
 
-    // (Other handlers registered in Tasks 10–11.)
+    httpd_uri_t cal_g  = {.uri = "/calibrate",         .method = HTTP_GET,  .handler = calibrate_get};
+    httpd_uri_t cal_r  = {.uri = "/api/reading",       .method = HTTP_GET,  .handler = api_reading_get};
+    httpd_uri_t cal_d  = {.uri = "/api/calibrate/dry", .method = HTTP_POST, .handler = api_calibrate_dry};
+    httpd_uri_t cal_w  = {.uri = "/api/calibrate/wet", .method = HTTP_POST, .handler = api_calibrate_wet};
+    httpd_uri_t cal_s  = {.uri = "/api/calibrate/save",.method = HTTP_POST, .handler = api_calibrate_save};
+    httpd_register_uri_handler(s_server, &cal_g);
+    httpd_register_uri_handler(s_server, &cal_r);
+    httpd_register_uri_handler(s_server, &cal_d);
+    httpd_register_uri_handler(s_server, &cal_w);
+    httpd_register_uri_handler(s_server, &cal_s);
+
     return ESP_OK;
 }
 

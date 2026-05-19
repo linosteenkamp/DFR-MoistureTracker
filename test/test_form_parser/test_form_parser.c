@@ -53,6 +53,16 @@ static void test_handles_trailing_field(void) {
     TEST_ASSERT_EQUAL_STRING("y", b);
 }
 
+static void test_does_not_match_substring_of_other_field(void) {
+    char ssid[16] = {0};
+    form_field_t fields[] = {{"ssid", ssid, sizeof(ssid)}};
+    // The "xssid=foo&" segment must NOT be picked up for field "ssid";
+    // the real value "bar" must win.
+    bool ok = form_parser_extract("xssid=foo&ssid=bar", fields, 1);
+    TEST_ASSERT_TRUE(ok);
+    TEST_ASSERT_EQUAL_STRING("bar", ssid);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_extracts_three_fields);
@@ -60,5 +70,6 @@ int main(void) {
     RUN_TEST(test_returns_false_when_value_overflows_buffer);
     RUN_TEST(test_decodes_plus_as_space);
     RUN_TEST(test_handles_trailing_field);
+    RUN_TEST(test_does_not_match_substring_of_other_field);
     return UNITY_END();
 }

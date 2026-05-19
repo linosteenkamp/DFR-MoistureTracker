@@ -8,7 +8,6 @@ static void decode_plus_to_space(char *s) {
 }
 
 static bool extract_one(const char *body, const form_field_t *f) {
-    // Build "<name>=" search prefix on the stack (max ~32 bytes).
     char needle[40];
     size_t name_len = strlen(f->name);
     if (name_len + 2 > sizeof(needle)) return false;
@@ -16,7 +15,16 @@ static bool extract_one(const char *body, const form_field_t *f) {
     needle[name_len] = '=';
     needle[name_len + 1] = '\0';
 
-    const char *start = strstr(body, needle);
+    const char *start = NULL;
+    const char *search = body;
+    while ((search = strstr(search, needle)) != NULL) {
+        // Match is valid only at start of body or immediately after '&'.
+        if (search == body || *(search - 1) == '&') {
+            start = search;
+            break;
+        }
+        search++;  // skip past this false match and keep searching
+    }
     if (!start) return false;
     start += name_len + 1;
 

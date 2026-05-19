@@ -25,6 +25,9 @@ uint32_t soil_calibration_get_dry_mv(void) { return s_dry; }
 uint32_t soil_calibration_get_wet_mv(void) { return s_wet; }
 uint32_t soil_calibration_get_cal_ts(void) { return s_ts;  }
 
+// Not atomic across the three keys — a mid-save NVS failure leaves the
+// namespace partially updated, and the in-RAM cache stays stale until the
+// next init re-reads NVS and defaults whichever keys are missing.
 bool soil_calibration_save(uint32_t dry_mv, uint32_t wet_mv, uint32_t cal_ts) {
     if (!nvs_shim_set_u32(NS, KEY_DRY, dry_mv)) return false;
     if (!nvs_shim_set_u32(NS, KEY_WET, wet_mv)) return false;

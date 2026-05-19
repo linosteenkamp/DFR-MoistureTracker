@@ -1,0 +1,10 @@
+idf_component_register(
+    SRCS
+        "test_calibration_nvs.c"
+        "../../src/soil_calibration.c"
+        "../../src/nvs_shim_esp.c"
+    INCLUDE_DIRS
+        "../../include"
+    REQUIRES
+        nvs_flash
+)

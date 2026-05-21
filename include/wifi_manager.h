@@ -37,4 +37,12 @@ bool wifi_manager_wait_connected(int timeout_sec);
  */
 void wifi_manager_stop(void);
 
+/**
+ * @brief Get the current AP RSSI (signal strength in dBm).
+ *
+ * @return RSSI in dBm (negative number, closer to 0 = stronger), or 0
+ *         if the station is not currently connected.
+ */
+int wifi_manager_get_rssi(void);
+
 #endif // WIFI_MANAGER_H

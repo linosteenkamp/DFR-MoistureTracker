@@ -18,10 +18,10 @@ Connect the DFRobot Waterproof Capacitive Soil Moisture Sensor 2 to your ESP32-C
 
 ### Available ADC Pins on ESP32-C6 (ADC1 only)
 - GPIO0 → ADC1_CH0 (used by battery monitor)
-- GPIO1 → ADC1_CH1 (free)
+- GPIO1 → ADC1_CH1 (used as digital CS for e-paper, see DISPLAY.md)
 - GPIO2 → ADC1_CH2 (used by soil moisture AOUT)
 - GPIO3 → ADC1_CH3 (used as soil sensor power switch, not as ADC)
-- GPIO4 → ADC1_CH4 (free)
+- GPIO4 → ADC1_CH4 (used as digital BUSY input for e-paper, see DISPLAY.md)
 - GPIO5 → ADC1_CH5 (free)
 - GPIO6 → ADC1_CH6 (free)
 

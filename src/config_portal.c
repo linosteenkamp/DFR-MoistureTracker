@@ -122,7 +122,7 @@ static const char *html_reset_confirm =
 
 static esp_err_t root_get(httpd_req_t *req) {
     s_idle_ticks = 0;
-    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
     return httpd_resp_send(req, html_menu, HTTPD_RESP_USE_STRLEN);
 }
 
@@ -168,7 +168,7 @@ static esp_err_t wifi_get(httpd_req_t *req) {
         "<a href='/'>Back</a></div></body></html>",
         ssid_esc, pw_placeholder, pw_required, device_id_esc);
 
-    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
     esp_err_t err = httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
     free(body);
     return err;
@@ -215,7 +215,7 @@ static esp_err_t wifi_post(httpd_req_t *req) {
     // — send the user to /calibrate first. api_calibrate_save will restart
     // after the first calibration lands. Return visits (cal_ts != 0) keep
     // the original instant-restart behaviour.
-    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
     if (soil_calibration_get_cal_ts() == 0) {
         return httpd_resp_send(req, html_wifi_saved_next_step, HTTPD_RESP_USE_STRLEN);
     }
@@ -227,7 +227,7 @@ static esp_err_t wifi_post(httpd_req_t *req) {
 
 static esp_err_t calibrate_get(httpd_req_t *req) {
     s_idle_ticks = 0;
-    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
     return httpd_resp_send(req, html_calibrate, HTTPD_RESP_USE_STRLEN);
 }
 
@@ -328,7 +328,7 @@ static esp_err_t status_get(httpd_req_t *req) {
         "<tr><td class='k'>Live %%</td><td>%.1f</td></tr>"
         "</table><a href='/'>Back</a></div></body></html>",
         (unsigned)dry, (unsigned)wet, (unsigned)ts, raw, pct);
-    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
     esp_err_t err = httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
     free(body);
     return err;
@@ -336,7 +336,7 @@ static esp_err_t status_get(httpd_req_t *req) {
 
 static esp_err_t factory_reset_get(httpd_req_t *req) {
     s_idle_ticks = 0;
-    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
     return httpd_resp_send(req, html_reset_confirm, HTTPD_RESP_USE_STRLEN);
 }
 
@@ -344,7 +344,7 @@ static esp_err_t factory_reset_post(httpd_req_t *req) {
     s_idle_ticks = 0;
     wifi_credentials_clear();
     soil_calibration_clear();
-    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_send(req,
         "<html><body><h1>Wiped. Restarting…</h1></body></html>",
         HTTPD_RESP_USE_STRLEN);

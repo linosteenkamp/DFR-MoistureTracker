@@ -130,8 +130,12 @@ static esp_err_t wifi_get(httpd_req_t *req) {
     const char *pw_placeholder = has_creds ? "(saved \xE2\x80\x94 leave blank to keep)" : "WiFi password";
     const char *pw_required    = has_creds ? "" : " required";
 
-    char body[1536];
-    snprintf(body, sizeof(body),
+    // Heap-allocate body — httpd task stack is ~4 KB, and a 1.5 KB buffer
+    // here plus the escape buffers above blew it (observed stack overflow).
+    const size_t body_len = 1536;
+    char *body = malloc(body_len);
+    if (!body) { httpd_resp_send_500(req); return ESP_FAIL; }
+    snprintf(body, body_len,
         "<!DOCTYPE html><html><head><title>WiFi Setup</title>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<style>body{font-family:Arial;margin:40px;background:#f0f0f0}"
@@ -149,7 +153,9 @@ static esp_err_t wifi_get(httpd_req_t *req) {
         ssid_esc, pw_placeholder, pw_required, device_id_esc);
 
     httpd_resp_set_type(req, "text/html");
-    return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+    esp_err_t err = httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+    free(body);
+    return err;
 }
 
 static esp_err_t wifi_post(httpd_req_t *req) {
@@ -265,8 +271,12 @@ static esp_err_t status_get(httpd_req_t *req) {
     uint32_t ts  = soil_calibration_get_cal_ts();
     float pct = soil_moisture_calc_percentage(raw, (int)dry, (int)wet);
 
-    char body[768];
-    snprintf(body, sizeof(body),
+    // Heap-allocate body for the same reason as wifi_get — httpd task
+    // stack is small and putting near-1 KB buffers on it is unsafe.
+    const size_t body_len = 768;
+    char *body = malloc(body_len);
+    if (!body) { httpd_resp_send_500(req); return ESP_FAIL; }
+    snprintf(body, body_len,
         "<!DOCTYPE html><html><head><title>Status</title>"
         "<style>body{font-family:Arial;margin:40px;background:#f0f0f0}"
         ".c{background:white;padding:30px;border-radius:10px;max-width:480px;margin:auto}"
@@ -281,7 +291,9 @@ static esp_err_t status_get(httpd_req_t *req) {
         "</table><a href='/'>Back</a></div></body></html>",
         (unsigned)dry, (unsigned)wet, (unsigned)ts, raw, pct);
     httpd_resp_set_type(req, "text/html");
-    return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+    esp_err_t err = httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+    free(body);
+    return err;
 }
 
 static esp_err_t factory_reset_get(httpd_req_t *req) {

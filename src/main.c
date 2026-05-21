@@ -48,6 +48,7 @@
 #include "battery_monitor.h"
 #include "soil_moisture.h"
 #include "soil_calibration.h"
+#include "display.h"
 #include "mqtt_publisher.h"
 #include "mqtt_credentials.h"  // MQTT broker credentials (not in git)
 
@@ -407,8 +408,23 @@ static esp_err_t publish_telemetry_once(void) {
     // Wait a bit for message to be sent
     ESP_LOGI(TAG, "Waiting for publish to complete...");
     vTaskDelay(pdMS_TO_TICKS(PUBLISH_WAIT_MS));
-    
+
     ESP_LOGI(TAG, "Telemetry published successfully");
+
+    // Refresh the e-paper with the values we just published.
+    display_telemetry_t dt = {
+        .device_id     = device_id_buffer,
+        .moisture_pct  = soil_moisture,
+        .raw_mv        = soil_moisture_read_raw_mv(),
+        .battery_v     = voltage,
+        .battery_pct   = display_battery_v_to_pct(voltage),
+        .wifi_rssi_dbm = wifi_manager_get_rssi(),
+    };
+    if (display_init() == ESP_OK) {
+        display_show_telemetry(&dt);
+        display_deinit();
+    }
+
     return ESP_OK;
 }
 
@@ -418,6 +434,10 @@ static esp_err_t publish_telemetry_once(void) {
 
 static void run_portal_then_sleep(void) {
     ESP_LOGI(TAG, "Entering config portal");
+    if (display_init() == ESP_OK) {
+        display_show_portal();
+        display_deinit();
+    }
     config_portal_run();   // blocks until save or timeout
     enter_deep_sleep(DEEP_SLEEP_INTERVAL_SEC);
 }

@@ -43,12 +43,12 @@
 // Module interfaces following SOLID principles
 #include "wifi_credentials.h"
 #include "wifi_manager.h"
-#include "wifi_provisioning.h"
+#include "config_portal.h"
 #include "adc_manager.h"
 #include "battery_monitor.h"
 #include "soil_moisture.h"
+#include "soil_calibration.h"
 #include "mqtt_publisher.h"
-#include "factory_reset.h"
 #include "mqtt_credentials.h"  // MQTT broker credentials (not in git)
 
 static const char *TAG = "MAIN";
@@ -64,13 +64,11 @@ static char device_id_buffer[33] = {0};
 // MQTT credentials are defined in include/mqtt_credentials.h (not committed to git)
 // MQTT_BROKER_URI, MQTT_USERNAME, MQTT_PASSWORD, MQTT_TOPIC_PREFIX, MQTT_KEEPALIVE_SEC
 
-#define MQTT_BASE_TOPIC      MQTT_TOPIC_PREFIX           ///< Base topic (deprecated, uses prefix + device_id)x + device_id)
 #define MQTT_KEEPALIVE_SEC   10                          ///< MQTT keepalive interval in seconds
 #define DEFAULT_DEVICE_ID    "moisture01"                    ///< Fallback device ID if not provisioned
 #define WIFI_TIMEOUT_SEC     30                          ///< WiFi connection timeout before retry
 #define MQTT_WAIT_MS         3000                        ///< Time to wait for MQTT connection (milliseconds)
 #define PUBLISH_WAIT_MS      2000                        ///< Time to wait after publishing before sleep (milliseconds)
-#define PROVISIONING_TIMEOUT_SEC 600                     ///< Max time to keep SoftAP up before giving up and sleeping (10 min)
 
 // Deep Sleep Configuration
 #define DEEP_SLEEP_INTERVAL_SEC  3600                    ///< Deep sleep duration in seconds (3600 = 1 hour)
@@ -146,14 +144,10 @@ static esp_err_t init_system(void) {
     }
     ESP_LOGI(TAG, "ADC manager initialized");
     
-    // Initialize factory reset button
-    ESP_LOGI(TAG, "Initializing factory reset button...");
-    ret = factory_reset_init();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize factory reset button");
-        return ret;
-    }
-    ESP_LOGI(TAG, "Factory reset button initialized");
+    // Initialize soil calibration (loads NVS values or falls back to defaults)
+    ESP_LOGI(TAG, "Initializing soil calibration...");
+    soil_calibration_init();
+    ESP_LOGI(TAG, "Soil calibration loaded");
     
     // Initialize battery monitor
     ESP_LOGI(TAG, "Initializing battery monitor...");
@@ -175,53 +169,6 @@ static esp_err_t init_system(void) {
     }
     
     return ESP_OK;
-}
-
-// ============================================================================
-// WiFi Provisioning
-// ============================================================================
-
-/**
- * @brief Handle WiFi provisioning workflow
- * 
- * Manages the complete provisioning process:
- * 1. Starts provisioning mode (creates SoftAP)
- * 2. Waits for user to connect and configure WiFi
- * 3. Restarts device after successful provisioning
- * 
- * Single Responsibility: Manage the provisioning state machine
- * 
- * @note This function blocks until provisioning is complete
- * @note Device automatically restarts after provisioning
- * @note Will not return - device restarts in this function
- */
-static esp_err_t handle_provisioning(void) {
-    ESP_LOGI(TAG, "Starting provisioning mode");
-
-    if (wifi_provisioning_start() != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start provisioning");
-        return ESP_FAIL;
-    }
-
-    // Wait for provisioning to complete OR timeout. SoftAP draws ~100+ mA so we
-    // refuse to sit here indefinitely — give the user 10 min then deep-sleep.
-    ESP_LOGI(TAG, "Waiting for user to configure WiFi (timeout %d s)...", PROVISIONING_TIMEOUT_SEC);
-    int elapsed = 0;
-    while (!wifi_provisioning_is_complete() && elapsed < PROVISIONING_TIMEOUT_SEC) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        elapsed++;
-    }
-
-    if (!wifi_provisioning_is_complete()) {
-        ESP_LOGW(TAG, "Provisioning timed out — stopping SoftAP and sleeping until next wake");
-        wifi_provisioning_stop();
-        return ESP_FAIL;
-    }
-
-    ESP_LOGI(TAG, "Provisioning complete, restarting...");
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    esp_restart();
-    return ESP_OK;  // not reached
 }
 
 // ============================================================================
@@ -247,15 +194,6 @@ static esp_err_t handle_provisioning(void) {
  */
 static esp_err_t setup_wifi(void) {
     ESP_LOGI(TAG, "Setting up WiFi connection");
-    
-    // Check if device is provisioned
-    if (!wifi_credentials_is_provisioned()) {
-        ESP_LOGI(TAG, "Device not provisioned");
-        // handle_provisioning() either esp_restart()s on success or returns
-        // ESP_FAIL on timeout. In both cases we just bubble the failure up so
-        // the caller deep-sleeps; we never wipe credentials here.
-        return handle_provisioning();
-    }
 
     // Initialize WiFi with stored credentials
     esp_err_t err = wifi_manager_init_sta();
@@ -370,13 +308,6 @@ static void enter_deep_sleep(uint32_t seconds) {
     // if their subsystems were never started.
     mqtt_publisher_stop();
     wifi_manager_stop();
-    wifi_provisioning_stop();
-
-    // Drop the factory-reset pull-up before sleep. The pin is wired to GND via
-    // a momentary switch; with the internal ~45 kΩ pull-up active we'd leak
-    // ~75 µA continuously if the switch is ever held. GPIO 20 is not RTC-
-    // capable on C6 so we just disable the pull and let it float.
-    gpio_set_pull_mode(GPIO_NUM_20, GPIO_FLOATING);
 
     // Isolate the analog input pins (battery on GPIO 0, soil AOUT on GPIO 2)
     // so the digital pads don't leak through pull resistors in sleep.
@@ -390,7 +321,18 @@ static void enter_deep_sleep(uint32_t seconds) {
     // On C6, per-pin hold (gpio_hold_en) persists through deep sleep on its own —
     // the chip uses SOC_GPIO_SUPPORT_HOLD_SINGLE_IO_IN_DSLP, so no global enable is needed.
     gpio_hold_en(GPIO_NUM_3);
-    
+
+    // GPIO7 = config-portal wake button (LP-capable, momentary push-to-GND, internal pull-up).
+    gpio_config_t btn_conf = {
+        .pin_bit_mask = (1ULL << GPIO_NUM_7),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&btn_conf);
+    esp_deep_sleep_enable_gpio_wakeup(BIT(GPIO_NUM_7), ESP_GPIO_WAKEUP_GPIO_LOW);
+
     // Optional: Print wake time for debugging
     int64_t now_us = esp_timer_get_time();
     int64_t wake_us = now_us + (seconds * uS_TO_S_FACTOR);
@@ -471,51 +413,13 @@ static esp_err_t publish_telemetry_once(void) {
 }
 
 // ============================================================================
-// Legacy Telemetry Loop (Not Used with Deep Sleep)
+// Portal Mode
 // ============================================================================
 
-/**
- * @brief Main telemetry publishing loop (DEPRECATED - Using deep sleep instead)
- * 
- * This function is no longer used with deep sleep enabled.
- * Left for reference or if switching back to continuous operation.
- * 
- * Original behavior:
- * - Infinite loop checking factory reset and publishing telemetry
- * - Published every TELEMETRY_INTERVAL_MS
- * 
- * @deprecated Use publish_telemetry_once() + deep sleep instead
- */
-/**
- * @deprecated Use publish_telemetry_once() + deep sleep instead
- */
-static void telemetry_loop(void) {
-    ESP_LOGI(TAG, "Starting legacy telemetry loop (not used with deep sleep)");
-    
-    while (1) {
-        // Check for factory reset button
-        factory_reset_check();
-        
-        // Check if both WiFi and MQTT are connected
-        if (wifi_manager_is_connected() && mqtt_publisher_is_connected()) {
-            // Read battery voltage
-            float voltage = battery_monitor_read_voltage();
-            
-            // Read soil moisture (will return 0 if not initialized)
-            float soil_moisture = soil_moisture_read_percentage();
-            
-            // Publish telemetry using device ID
-            esp_err_t err = mqtt_publisher_publish_telemetry(voltage, soil_moisture, device_id_buffer);
-            if (err != ESP_OK) {
-                ESP_LOGW(TAG, "Failed to publish telemetry");
-            }
-        } else {
-            ESP_LOGW(TAG, "Not connected, skipping telemetry");
-        }
-        
-        // Wait for next interval (deprecated - using deep sleep instead)
-        vTaskDelay(pdMS_TO_TICKS(30000));  // 30 seconds
-    }
+static void run_portal_then_sleep(void) {
+    ESP_LOGI(TAG, "Entering config portal");
+    config_portal_run();   // blocks until save or timeout
+    enter_deep_sleep(DEEP_SLEEP_INTERVAL_SEC);
 }
 
 // ============================================================================
@@ -572,6 +476,9 @@ void app_main(void) {
         case ESP_SLEEP_WAKEUP_UNDEFINED:
             ESP_LOGI(TAG, "Wake cause: Power on reset or first boot");
             break;
+        case ESP_SLEEP_WAKEUP_GPIO:
+            ESP_LOGI(TAG, "Wake cause: GPIO button");
+            break;
         default:
             ESP_LOGI(TAG, "Wake cause: %d", wake_cause);
             break;
@@ -583,7 +490,13 @@ void app_main(void) {
         enter_deep_sleep(DEEP_SLEEP_INTERVAL_SEC);
         return;  // Never reached
     }
-    
+
+    // Portal mode triggers: GPIO wake (button press) or never-provisioned device.
+    if (wake_cause == ESP_SLEEP_WAKEUP_GPIO || !wifi_credentials_is_provisioned()) {
+        run_portal_then_sleep();
+        return;
+    }
+
     // Step 2: Setup WiFi (handles provisioning if needed)
     if (setup_wifi() != ESP_OK) {
         ESP_LOGE(TAG, "WiFi setup failed, entering sleep");
@@ -610,7 +523,6 @@ void app_main(void) {
     ESP_LOGW(TAG, "DISABLE_DEEP_SLEEP set - looping publish every %d ms", TEST_PUBLISH_INTERVAL_MS);
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(TEST_PUBLISH_INTERVAL_MS));
-        factory_reset_check();
         publish_telemetry_once();
     }
 #else

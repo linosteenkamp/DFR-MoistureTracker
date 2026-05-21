@@ -23,22 +23,40 @@
  * 3. Call soil_moisture_read_voltage() for raw voltage
  * 
  * Calibration:
- * - Measure sensor in air (dry) → update SENSOR_DRY_MV
- * - Measure sensor in water (wet) → update SENSOR_WET_MV
- * - See SOIL_MOISTURE_SETUP.md for detailed calibration procedure
+ * - Captured at runtime via the config portal (see CONFIG_PORTAL.md)
+ * - Stored in NVS namespace "soil_cal" and read via soil_calibration_get_*
+ * - Defaults if NVS is empty: dry=2800 mV, wet=0 mV
  * 
  * @author DFRobot Project
  * @date 2025
  */
 
+#ifndef TEST_HOST
 #include "soil_moisture.h"
 #include "adc_manager.h"
+#include "soil_calibration.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_log.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#endif
+
+// Pure percentage math, callable from host tests.
+// Linear interpolation between dry (0%) and wet (100%) mV thresholds.
+float soil_moisture_calc_percentage(int raw_mv, int dry_mv, int wet_mv) {
+    if (raw_mv >= dry_mv) return 0.0f;
+    if (raw_mv <= wet_mv) return 100.0f;
+    float span = (float)(dry_mv - wet_mv);
+    if (span <= 0.0f) return 0.0f;
+    float pct = 100.0f * (float)(dry_mv - raw_mv) / span;
+    if (pct < 0.0f) return 0.0f;
+    if (pct > 100.0f) return 100.0f;
+    return pct;
+}
+
+#ifndef TEST_HOST
 
 static const char *TAG = "SOIL_MOISTURE";
 
@@ -52,16 +70,6 @@ static const char *TAG = "SOIL_MOISTURE";
 #define SAMPLE_COUNT          10               ///< Number of ADC samples to average (noise reduction)
 #define SOIL_PWR_GPIO         GPIO_NUM_3       ///< GPIO3 = sensor VCC (red) — driven HIGH only during read
 #define SOIL_WARMUP_MS        150              ///< Settle time after powering sensor before sampling
-
-// ============================================================================
-// Calibration Values - CUSTOMIZE THESE FOR YOUR SENSOR
-// ============================================================================
-// Measure your specific sensor in air (dry) and water (wet) conditions.
-// Update these values for accurate moisture percentage readings.
-// See SOIL_MOISTURE_SETUP.md for calibration procedure.
-
-#define SENSOR_DRY_MV         2800   ///< Voltage in air (dry) — calibrated 2026-05-17
-#define SENSOR_WET_MV         0      ///< Voltage in water (wet) — calibrated 2026-05-17
 
 // Static module state
 static adc_cali_handle_t cali_handle = NULL;  ///< ADC calibration handle from adc_manager
@@ -147,7 +155,9 @@ esp_err_t soil_moisture_init(void) {
 
     initialized = true;
     ESP_LOGI(TAG, "Soil moisture sensor initialized on ADC1 Channel %d", SOIL_ADC_CHAN);
-    ESP_LOGI(TAG, "Calibration: Dry=%d mV, Wet=%d mV", SENSOR_DRY_MV, SENSOR_WET_MV);
+    ESP_LOGI(TAG, "Calibration (runtime): Dry=%u mV, Wet=%u mV",
+             (unsigned)soil_calibration_get_dry_mv(),
+             (unsigned)soil_calibration_get_wet_mv());
     
     return ESP_OK;
 }
@@ -156,82 +166,67 @@ esp_err_t soil_moisture_init(void) {
 // Voltage Reading
 // ============================================================================
 
+// Returns averaged sensor mV, or -1 on hard failure.
+static int sample_raw_mv(void) {
+    if (!initialized) {
+        ESP_LOGE(TAG, "Sensor not initialized");
+        return -1;
+    }
+    adc_oneshot_unit_handle_t adc_handle = adc_manager_get_handle();
+    if (!adc_handle) {
+        ESP_LOGE(TAG, "ADC handle not available");
+        return -1;
+    }
+    gpio_set_level(SOIL_PWR_GPIO, 1);
+    vTaskDelay(pdMS_TO_TICKS(SOIL_WARMUP_MS));
+
+    uint32_t sum = 0;
+    int n = 0;
+    for (int i = 0; i < SAMPLE_COUNT; i++) {
+        int raw = 0;
+        if (adc_oneshot_read(adc_handle, SOIL_ADC_CHAN, &raw) == ESP_OK) {
+            sum += raw; n++;
+        }
+    }
+    gpio_set_level(SOIL_PWR_GPIO, 0);
+    if (n == 0) return -1;
+
+    int mv = 0;
+    if (adc_cali_raw_to_voltage(cali_handle, (int)(sum / n), &mv) != ESP_OK) return -1;
+    return mv;
+}
+
 /**
  * @brief Read raw sensor voltage
- * 
+ *
  * Performs ADC reading and returns the calibrated voltage from the sensor.
  * Takes multiple samples and averages them for noise reduction.
- * 
+ *
  * Reading Process:
  * 1. Verify sensor is initialized
  * 2. Take SAMPLE_COUNT (10) ADC readings
  * 3. Average the readings
  * 4. Apply calibration to convert to millivolts
  * 5. Convert to volts and return
- * 
+ *
  * @return float Sensor voltage in volts (e.g., 1.85V)
  * @return 0.0 if sensor not initialized or reading failed
- * 
+ *
  * @note Higher voltage = drier conditions
  * @note Lower voltage = wetter conditions
  * @note Typical range: 1.0V (wet) to 3.0V (dry)
  */
 
 float soil_moisture_read_voltage(void) {
-    if (!initialized) {
-        ESP_LOGE(TAG, "Sensor not initialized");
-        return 0.0f;
-    }
+    int mv = sample_raw_mv();
+    if (mv < 0) return 0.0f;
+    ESP_LOGD(TAG, "Raw mV: %d", mv);
+    return (float)mv / 1000.0f;
+}
 
-    // Get shared ADC handle
-    adc_oneshot_unit_handle_t adc_handle = adc_manager_get_handle();
-    if (!adc_handle) {
-        ESP_LOGE(TAG, "ADC handle not available");
-        return 0.0f;
-    }
-
-    // Power up the sensor and let it settle before sampling
-    gpio_set_level(SOIL_PWR_GPIO, 1);
-    vTaskDelay(pdMS_TO_TICKS(SOIL_WARMUP_MS));
-
-    // Take multiple samples and average to reduce noise
-    uint32_t value_sum = 0;
-    int valid_samples = 0;
-
-    for (int i = 0; i < SAMPLE_COUNT; i++) {
-        int raw_value = 0;
-        esp_err_t err = adc_oneshot_read(adc_handle, SOIL_ADC_CHAN, &raw_value);
-        if (err == ESP_OK) {
-            value_sum += raw_value;
-            valid_samples++;
-        } else {
-            ESP_LOGW(TAG, "ADC read failed on sample %d: %s", i, esp_err_to_name(err));
-        }
-    }
-
-    // Power down the sensor as soon as sampling is done
-    gpio_set_level(SOIL_PWR_GPIO, 0);
-
-    if (valid_samples == 0) {
-        ESP_LOGE(TAG, "All ADC reads failed");
-        return 0.0f;
-    }
-
-    int avg_raw = value_sum / valid_samples;
-
-    // Convert raw ADC value to voltage using calibration
-    int voltage_mV = 0;
-    esp_err_t err = adc_cali_raw_to_voltage(cali_handle, avg_raw, &voltage_mV);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to convert ADC to voltage: %s", esp_err_to_name(err));
-        return 0.0f;
-    }
-
-    float voltage = (float)voltage_mV / 1000.0f;
-    
-    ESP_LOGD(TAG, "Raw ADC: %d, Voltage: %.3f V (%d mV)", avg_raw, voltage, voltage_mV);
-
-    return voltage;
+int soil_moisture_read_raw_mv(void) {
+    int mv = sample_raw_mv();
+    return mv < 0 ? 0 : mv;
 }
 
 // ============================================================================
@@ -247,10 +242,8 @@ float soil_moisture_read_voltage(void) {
  * Conversion Process:
  * 1. Read raw voltage using soil_moisture_read_voltage()
  * 2. Convert volts to millivolts
- * 3. Apply linear interpolation:
- *    - If voltage >= SENSOR_DRY_MV → 0% (dry)
- *    - If voltage <= SENSOR_WET_MV → 100% (wet)
- *    - Otherwise: percentage = 100 * (DRY - voltage) / (DRY - WET)
+ * 3. Apply linear interpolation against runtime dry/wet thresholds
+ *    fetched from soil_calibration (see soil_moisture_calc_percentage)
  * 4. Clamp result to 0-100% range
  * 
  * Linear Interpolation Formula:
@@ -284,27 +277,11 @@ float soil_moisture_read_percentage(void) {
     float voltage = soil_moisture_read_voltage();
     int voltage_mV = (int)(voltage * 1000.0f);
 
-    // Convert voltage to percentage using linear interpolation
-    // Lower voltage = more water (higher moisture)
-    // Higher voltage = less water (lower moisture)
-    float percentage;
-    
-    if (voltage_mV >= SENSOR_DRY_MV) {
-        // Sensor is dry (in air)
-        percentage = 0.0f;
-    } else if (voltage_mV <= SENSOR_WET_MV) {
-        // Sensor is fully wet
-        percentage = 100.0f;
-    } else {
-        // Linear interpolation between wet and dry
-        // Invert the scale: lower voltage = higher percentage
-        percentage = 100.0f * (float)(SENSOR_DRY_MV - voltage_mV) / 
-                     (float)(SENSOR_DRY_MV - SENSOR_WET_MV);
-    }
-
-    // Clamp to valid range
-    if (percentage < 0.0f) percentage = 0.0f;
-    if (percentage > 100.0f) percentage = 100.0f;
+    // Convert voltage to percentage using pure math function
+    float percentage = soil_moisture_calc_percentage(
+        voltage_mV,
+        (int)soil_calibration_get_dry_mv(),
+        (int)soil_calibration_get_wet_mv());
 
     ESP_LOGI(TAG, "Moisture: %.1f%% (%.3f V, %d mV)", percentage, voltage, voltage_mV);
 
@@ -338,6 +315,8 @@ esp_err_t soil_moisture_deinit(void) {
     cali_handle = NULL;
     initialized = false;
     ESP_LOGI(TAG, "Soil moisture sensor deinitialized");
-    
+
     return ESP_OK;
 }
+
+#endif // TEST_HOST

@@ -27,31 +27,9 @@ Connect the DFRobot Waterproof Capacitive Soil Moisture Sensor 2 to your ESP32-C
 
 ## Sensor Calibration
 
-The soil moisture sensor requires calibration for accurate readings. The sensor outputs different voltages depending on the moisture level:
+Calibration is captured per device at runtime through the config portal. There are no compile-time calibration constants to edit.
 
-- **Dry conditions (air)**: ~2.5-3.0V
-- **Wet conditions (water)**: ~1.0-1.5V
-
-### Calibration Procedure
-
-1. **Measure Dry Value:**
-   - Leave the sensor in air (completely dry)
-   - Note the voltage reading from the logs
-   - Update `SENSOR_DRY_MV` in [src/soil_moisture.c](src/soil_moisture.c#L17)
-
-2. **Measure Wet Value:**
-   - Submerge the sensor in water up to the MAX line (do NOT submerge the electronics)
-   - Note the voltage reading from the logs
-   - Update `SENSOR_WET_MV` in [src/soil_moisture.c](src/soil_moisture.c#L18)
-
-### Default Calibration Values
-
-```c
-#define SENSOR_DRY_MV         2800   // Voltage in air (dry)
-#define SENSOR_WET_MV         1200   // Voltage in water (wet)
-```
-
-Adjust these values based on your actual sensor readings for best accuracy.
+See [CONFIG_PORTAL.md](CONFIG_PORTAL.md) for the procedure.
 
 ## How It Works
 

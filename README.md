@@ -8,7 +8,7 @@ Battery-powered ESP32-C6 IoT device with WiFi provisioning, soil moisture monito
 
 - **WiFi Provisioning**: SoftAP + web interface for easy WiFi configuration
 - **Device ID Configuration**: Customize MQTT topic during provisioning
-- **Factory Reset Button**: GPIO 20 long press (5 seconds) to reset credentials
+- **Config Portal**: SoftAP web UI for WiFi setup, sensor calibration, and factory reset — see [CONFIG_PORTAL.md](CONFIG_PORTAL.md)
 - **Soil Moisture Monitoring**: DFRobot capacitive sensor with calibration support
 - **Battery Monitoring**: ADC-based voltage reading with averaging
 - **MQTT Publishing**: JSON telemetry to configurable topic
@@ -50,7 +50,7 @@ The device uses ESP32's deep sleep mode for maximum battery efficiency:
 - **Battery Monitoring**: GPIO 0 (ADC1 Channel 0) with 2:1 voltage divider
 - **Soil Moisture AOUT**: GPIO 2 (ADC1 Channel 2) — DFRobot Capacitive Sensor analog signal (yellow)
 - **Soil Moisture VCC**: GPIO 3 — sensor power, switched by firmware (red)
-- **Factory Reset Button**: GPIO 20 to GND (internal pull-up enabled)
+- **Config Portal Button**: GPIO 7 to GND — press during deep sleep to wake into portal mode
 
 ### Wiring Diagram
 
@@ -61,21 +61,20 @@ FireBeetle 2 ESP32-C6
 │  GPIO 0 (ADC1_CH0) ─┼─→ Battery Voltage (2:1 divider)
 │  GPIO 2 (ADC1_CH2) ─┼─→ Soil Moisture Sensor AOUT (Yellow)
 │  GPIO 3            ─┼─→ Soil Moisture Sensor VCC (Red) — switched
-│  GPIO 20           ─┼─→ Factory Reset Button → GND
+│  GPIO 7            ─┼─→ Config Portal Button → GND
 │                     │
 │  GND               ─┼─→ Sensor GND (Black), Button
 │                     │
 └─────────────────────┘
 ```
 
-### Factory Reset Button Wiring
+### Config Portal Button Wiring
 
 Connect a momentary push button between:
-- **Pin 1**: GPIO 20 (on FireBeetle expansion header)
+- **Pin 1**: GPIO 7 (on FireBeetle expansion header)
 - **Pin 2**: GND (any ground pin)
 
-The internal pull-up resistor keeps GPIO 20 HIGH (~3.3V) when button is not pressed.
-Pressing the button connects GPIO 20 to GND (reads LOW).
+Press during deep sleep to wake the device into portal mode. See [CONFIG_PORTAL.md](CONFIG_PORTAL.md) for details.
 
 ## Getting Started
 
@@ -103,29 +102,6 @@ $ pio run --target monitor
    - Device ID (for MQTT topic: `zigbee2mqtt/{device_id}`)
 5. Submit - device saves credentials and restarts
 6. Device connects to your WiFi and starts publishing telemetry
-To reset the device and clear all stored credentials:
-
-1. **Press and hold** the button connected to **GPIO 20**
-2. **Hold for 5 seconds** (device will log countdown in serial monitor)
-3. Device will:
-   - Clear WiFi SSID, password, and device ID from NVS
-   - Display "Factory reset triggered!" message
-   - Restart automatically
-   - Boot into provisioning mode
-
-**Serial Monitor Output Example:**
-```
-I (12345) FACTORY_RESET: Button pressed - hold for 5 seconds to factory reset
-I (13345) FACTORY_RESET: Hold for 4 more seconds...
-I (14345) FACTORY_RESET: Hold for 3 more seconds...
-I (15345) FACTORY_RESET: Hold for 2 more seconds...
-I (16345) FACTORY_RESET: Hold for 1 more seconds...
-W (17345) FACTORY_RESET: Factory reset triggered!
-W (17345) FACTORY_RESET: Clearing WiFi credentials...
-W (17350) FACTORY_RESET: Restarting in 2 seconds...
-```
-
-**Note**: Releasing the button before 5 seconds will cancel the reset.
 
 ## MQTT Telemetry
 
@@ -158,10 +134,7 @@ After provisioning and connecting:
 
 ### Factory Reset
 
-Press and hold button on **GPIO 20** for **5 seconds**:
-- Clears all WiFi credentials and device ID
-- Restarts into provisioning mode
-- Progress shown in serial monitor
+Factory reset is available through the config portal at `http://192.168.4.1/factory-reset`. See [CONFIG_PORTAL.md](CONFIG_PORTAL.md).
 
 ## Configuration
 
@@ -204,22 +177,14 @@ $ pio run --target upload --target monitor
 Behavior with the flag set:
 - Full init runs once (WiFi → MQTT → first publish)
 - Device then loops `publish_telemetry_once()` every `TEST_PUBLISH_INTERVAL_MS` (default 5000 ms, defined in [src/main.c](src/main.c))
-- Factory reset (GPIO 20, 5 s hold) still works
+- Config portal (GPIO7 button or first boot) still works
 - No "Entering deep sleep" log line, no reboot between cycles
 
 Re-comment the line and re-flash to restore production deep-sleep behavior. The flag is orthogonal to `DEEP_SLEEP_INTERVAL_SEC` — both can be tuned independently.
 
 ### Soil Moisture Sensor Calibration
 
-Edit [src/soil_moisture.c](src/soil_moisture.c):
-
-```c
-#define SOIL_ADC_CHAN         ADC_CHANNEL_1  // GPIO1
-#define SENSOR_DRY_MV         2800           // Voltage in air (calibrate)
-#define SENSOR_WET_MV         1200           // Voltage in water (calibrate)
-```
-
-See [SOIL_MOISTURE_SETUP.md](SOIL_MOISTURE_SETUP.md) for calibration procedure.
+Calibration is captured at runtime through the config portal — no source edits required. See [CONFIG_PORTAL.md](CONFIG_PORTAL.md) for the procedure.
 
 ## Architecture
 
@@ -228,11 +193,11 @@ Modular design following SOLID principles:
 - **adc_manager**: Shared ADC1 unit management for multiple sensors
 - **wifi_credentials**: NVS storage management
 - **wifi_manager**: WiFi STA connection handling
-- **wifi_provisioning**: SoftAP + HTTP provisioning server
+- **config_portal**: SoftAP + HTTP portal (WiFi, calibration, status, factory reset) — see [CONFIG_PORTAL.md](CONFIG_PORTAL.md)
 - **battery_monitor**: ADC voltage reading for battery
 - **soil_moisture**: Capacitive soil moisture sensor interface
+- **soil_calibration**: NVS-backed runtime dry/wet mV calibration values
 - **mqtt_publisher**: MQTT client and telemetry publishing
-- **factory_reset**: GPIO button monitoring for factory reset
 - **main**: Application orchestration and telemetry loop
 
 ### ADC Resource Sharing
@@ -246,10 +211,9 @@ Both battery monitor and soil moisture sensor share ADC1 through the ADC manager
 ## Documentation
 
 - **[DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md)** - Complete developer documentation for maintenance and extension
-- **[SOIL_MOISTURE_SETUP.md](SOIL_MOISTURE_SETUP.md)** - Soil moisture sensor wiring, calibration, and troubleshooting
+- **[CONFIG_PORTAL.md](CONFIG_PORTAL.md)** - Config portal: WiFi setup, calibration, status, and factory reset
+- **[SOIL_MOISTURE_SETUP.md](SOIL_MOISTURE_SETUP.md)** - Soil moisture sensor wiring and troubleshooting
 - **[BATTERY_MONITOR.md](BATTERY_MONITOR.md)** - Battery monitoring system, voltage interpretation, and technical details
-- **[FACTORY_RESET.md](FACTORY_RESET.md)** - Factory reset button setup, usage, and configuration
-- **[WIFI_PROVISIONING.md](WIFI_PROVISIONING.md)** - WiFi provisioning process, web interface, and reset procedures
 - **[PARTITIONS.md](PARTITIONS.md)** - Flash memory partition layout, NVS storage, and customization guide
 
 ## Quick Reference
@@ -260,7 +224,7 @@ Both battery monitor and soil moisture sensor share ADC1 through the ADC manager
 | Battery Monitor | GPIO 0 | ADC1_CH0 | Built-in voltage divider (2:1) |
 | Soil Moisture AOUT | GPIO 2 | ADC1_CH2 | DFRobot capacitive sensor analog signal |
 | Soil Moisture VCC | GPIO 3 | - | Switched power — HIGH during read, held LOW in sleep |
-| Factory Reset | GPIO 20 | - | Button to GND, 5s hold |
+| Config Portal Button | GPIO 7 | - | Button to GND — press during sleep to open portal |
 
 ### Default Values
 | Setting | Value | Location |
@@ -269,14 +233,14 @@ Both battery monitor and soil moisture sensor share ADC1 through the ADC manager
 | Deep Sleep Interval | 3600 seconds (1 hour) | [src/main.c](src/main.c) |
 | WiFi AP Name | `FireBeetle_C6_Prov` | Provisioning mode |
 | Default Device ID | `sensor02` | [src/main.c](src/main.c) |
-| Soil Dry Value | 2800 mV | [src/soil_moisture.c](src/soil_moisture.c) |
-| Soil Wet Value | 1200 mV | [src/soil_moisture.c](src/soil_moisture.c) |
+| Soil Dry Default | 2800 mV | NVS `soil_cal` (portal-captured) |
+| Soil Wet Default | 0 mV | NVS `soil_cal` (portal-captured) |
 
 ## Troubleshooting
 
 **WiFi connection fails:**
 - Wait 30 seconds - device auto-resets to provisioning mode
-- Or use factory reset button (GPIO 20, hold 5 seconds)
+- Or use the config portal factory reset page — see [CONFIG_PORTAL.md](CONFIG_PORTAL.md)
 
 **MQTT not publishing:**
 - Check broker URI and credentials in [src/main.c](src/main.c)
@@ -289,14 +253,12 @@ Both battery monitor and soil moisture sensor share ADC1 through the ADC manager
 - Check ADC initialization in serial logs
 
 **Soil moisture readings inaccurate:**
-- Perform calibration procedure (see [SOIL_MOISTURE_SETUP.md](SOIL_MOISTURE_SETUP.md))
-- Update `SENSOR_DRY_MV` and `SENSOR_WET_MV` values
+- Recalibrate via the config portal (see [CONFIG_PORTAL.md](CONFIG_PORTAL.md))
 - Clean sensor probe
 
-**Factory reset button not responding:**
-- Check GPIO 20 connection to GND
-- Must hold for full 5 seconds
-- Watch serial monitor for countdown progress
+**Config portal not opening:**
+- Press GPIO7 button during deep sleep and wait a few seconds for the SoftAP to come up
+- Factory reset is available at `http://192.168.4.1/factory-reset` once connected
 
 **ADC initialization fails:**
 - Check for GPIO conflicts with other peripherals

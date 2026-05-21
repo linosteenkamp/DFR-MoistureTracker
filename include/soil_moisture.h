@@ -1,7 +1,9 @@
 #ifndef SOIL_MOISTURE_H
 #define SOIL_MOISTURE_H
 
+#ifndef TEST_HOST
 #include "esp_err.h"
+#endif
 
 /**
  * @brief Soil moisture sensor interface
@@ -51,12 +53,32 @@ float soil_moisture_read_voltage(void);
 
 /**
  * @brief Clean up soil moisture sensor resources
- * 
+ *
  * Releases ADC handles and calibration schemes.
  * Should be called before shutdown or reconfiguration.
- * 
+ *
  * @return ESP_OK on success, error code otherwise
  */
 esp_err_t soil_moisture_deinit(void);
+
+/**
+ * @brief Pure percentage math from raw ADC mV and calibration mV.
+ *
+ * Linear interpolation, clamped to [0, 100]. No hardware access.
+ * Exposed for unit testing and for direct callers that want the math
+ * without triggering a physical read.
+ */
+float soil_moisture_calc_percentage(int raw_mv, int dry_mv, int wet_mv);
+
+/**
+ * @brief Read averaged raw sensor value in millivolts.
+ *
+ * Like soil_moisture_read_voltage() but returns the integer mV from
+ * the same 10-sample average. Used by the calibration capture
+ * endpoints in config_portal.
+ *
+ * @return mV (0 if sensor not initialized or all reads fail)
+ */
+int soil_moisture_read_raw_mv(void);
 
 #endif // SOIL_MOISTURE_H

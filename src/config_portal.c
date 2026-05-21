@@ -17,10 +17,26 @@
 static const char *TAG = "CONFIG_PORTAL";
 static httpd_handle_t s_server = NULL;
 static esp_netif_t *s_ap_netif = NULL;
-static bool s_should_exit = false;
 static int  s_idle_ticks = 0;
 static int  s_pending_dry_mv = -1;
 static int  s_pending_wet_mv = -1;
+
+// Minimal HTML escape for single-quoted attribute values (handles &, ', <, >).
+// out_len should be >= 6x input length + 1 for worst-case all-escape input.
+static void html_escape_attr(const char *in, char *out, size_t out_len) {
+    if (!out_len) return;
+    size_t j = 0;
+    for (size_t i = 0; in[i] && j + 6 < out_len; i++) {
+        switch (in[i]) {
+            case '&':  memcpy(out + j, "&amp;",  5); j += 5; break;
+            case '\'': memcpy(out + j, "&#39;",  5); j += 5; break;
+            case '<':  memcpy(out + j, "&lt;",   4); j += 4; break;
+            case '>':  memcpy(out + j, "&gt;",   4); j += 4; break;
+            default:   out[j++] = in[i];
+        }
+    }
+    out[j] = '\0';
+}
 
 #define PROV_AP_SSID         "FireBeetle_C6_Prov"
 #define PORTAL_TIMEOUT_SEC   600
@@ -40,22 +56,6 @@ static const char *html_menu =
     "<a class='btn' href='/status'>Status</a>"
     "<a class='btn danger' href='/factory-reset'>Factory Reset</a>"
     "</div></body></html>";
-
-static const char *html_wifi_form =
-    "<!DOCTYPE html><html><head><title>WiFi Setup</title>"
-    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-    "<style>body{font-family:Arial;margin:40px;background:#f0f0f0}"
-    ".container{background:white;padding:30px;border-radius:10px;max-width:400px;margin:auto}"
-    "input{width:100%;padding:10px;margin:10px 0;box-sizing:border-box}"
-    "button{background:#4CAF50;color:white;padding:14px;border:none;width:100%;cursor:pointer;font-size:16px}"
-    "a{display:block;text-align:center;margin-top:14px}</style></head>"
-    "<body><div class='container'><h2>WiFi &amp; Device ID</h2>"
-    "<form action='/wifi' method='POST'>"
-    "<label>SSID:</label><input type='text' name='ssid' required>"
-    "<label>Password:</label><input type='password' name='password' required>"
-    "<label>Device ID:</label><input type='text' name='device_id' placeholder='moisture01' required>"
-    "<button type='submit'>Save &amp; Restart</button></form>"
-    "<a href='/'>Back</a></div></body></html>";
 
 static const char *html_wifi_saved =
     "<!DOCTYPE html><html><body><h1>WiFi saved.</h1>"
@@ -84,8 +84,9 @@ static const char *html_calibrate =
     "async function poll(){try{let r=await fetch('/api/reading');let j=await r.json();"
     "document.getElementById('live').textContent=j.raw_mv+' mV ('+j.percentage.toFixed(1)+'%)';}catch(e){}}"
     "setInterval(poll,1000);poll();"
-    "async function cap(k){let r=await fetch('/api/calibrate/'+k,{method:'POST'});let j=await r.json();"
-    "document.getElementById(k).textContent='captured: '+j.mv+' mV';}"
+    "async function cap(k){let r=await fetch('/api/calibrate/'+k,{method:'POST'});"
+    "if(!r.ok){document.getElementById(k).textContent='read failed — check wiring';return;}"
+    "let j=await r.json();document.getElementById(k).textContent='captured: '+j.mv+' mV';}"
     "async function save(){let r=await fetch('/api/calibrate/save',{method:'POST'});"
     "if(r.ok){document.body.innerHTML='<h1>Saved.</h1>';setTimeout(()=>location.href='/',1500);}"
     "else{alert('Capture both DRY and WET first.');}}"
@@ -111,8 +112,44 @@ static esp_err_t root_get(httpd_req_t *req) {
 
 static esp_err_t wifi_get(httpd_req_t *req) {
     s_idle_ticks = 0;
+
+    // Pre-populate from NVS so a user changing one field doesn't retype the others.
+    // Password is intentionally never echoed back — placeholder indicates whether
+    // one is saved; an empty submission preserves it.
+    char ssid[33] = {0};
+    char password[65] = {0};
+    char device_id[33] = {0};
+    bool has_creds      = wifi_credentials_load(ssid, sizeof(ssid), password, sizeof(password));
+    bool has_device_id  = wifi_credentials_load_device_id(device_id, sizeof(device_id));
+
+    char ssid_esc[33 * 6];
+    char device_id_esc[33 * 6];
+    html_escape_attr(has_creds     ? ssid      : "", ssid_esc,      sizeof(ssid_esc));
+    html_escape_attr(has_device_id ? device_id : "", device_id_esc, sizeof(device_id_esc));
+
+    const char *pw_placeholder = has_creds ? "(saved \xE2\x80\x94 leave blank to keep)" : "WiFi password";
+    const char *pw_required    = has_creds ? "" : " required";
+
+    char body[1536];
+    snprintf(body, sizeof(body),
+        "<!DOCTYPE html><html><head><title>WiFi Setup</title>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<style>body{font-family:Arial;margin:40px;background:#f0f0f0}"
+        ".container{background:white;padding:30px;border-radius:10px;max-width:400px;margin:auto}"
+        "input{width:100%%;padding:10px;margin:10px 0;box-sizing:border-box}"
+        "button{background:#4CAF50;color:white;padding:14px;border:none;width:100%%;cursor:pointer;font-size:16px}"
+        "a{display:block;text-align:center;margin-top:14px}</style></head>"
+        "<body><div class='container'><h2>WiFi &amp; Device ID</h2>"
+        "<form action='/wifi' method='POST'>"
+        "<label>SSID:</label><input type='text' name='ssid' value='%s' required>"
+        "<label>Password:</label><input type='password' name='password' placeholder='%s'%s>"
+        "<label>Device ID:</label><input type='text' name='device_id' value='%s' placeholder='moisture01' required>"
+        "<button type='submit'>Save &amp; Restart</button></form>"
+        "<a href='/'>Back</a></div></body></html>",
+        ssid_esc, pw_placeholder, pw_required, device_id_esc);
+
     httpd_resp_set_type(req, "text/html");
-    return httpd_resp_send(req, html_wifi_form, HTTPD_RESP_USE_STRLEN);
+    return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t wifi_post(httpd_req_t *req) {
@@ -139,7 +176,17 @@ static esp_err_t wifi_post(httpd_req_t *req) {
     free(buf);
     if (!ok) { httpd_resp_send_500(req); return ESP_FAIL; }
 
-    if (wifi_credentials_save(ssid, password) != ESP_OK) { httpd_resp_send_500(req); return ESP_FAIL; }
+    // Empty password field = keep the existing one (UX: user is only changing other fields).
+    const char *password_to_save = password;
+    char existing_ssid[33] = {0};
+    char existing_password[65] = {0};
+    if (password[0] == '\0' &&
+        wifi_credentials_load(existing_ssid, sizeof(existing_ssid),
+                              existing_password, sizeof(existing_password))) {
+        password_to_save = existing_password;
+    }
+
+    if (wifi_credentials_save(ssid, password_to_save) != ESP_OK) { httpd_resp_send_500(req); return ESP_FAIL; }
     if (wifi_credentials_save_device_id(device_id) != ESP_OK) { httpd_resp_send_500(req); return ESP_FAIL; }
 
     httpd_resp_set_type(req, "text/html");
@@ -173,6 +220,15 @@ static esp_err_t api_reading_get(httpd_req_t *req) {
 static esp_err_t api_capture(httpd_req_t *req, int *target) {
     s_idle_ticks = 0;
     int mv = soil_moisture_read_raw_mv();
+    // 0 mV from soil_moisture_read_raw_mv signals a hard failure
+    // (sensor not initialised or all ADC reads failed). Don't persist that
+    // as a real capture — return an error so the UI can prompt the user
+    // to check wiring instead of silently saving garbage calibration.
+    if (mv <= 0) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "sensor read failed (check wiring)");
+        return ESP_FAIL;
+    }
     *target = mv;
     char body[40];
     snprintf(body, sizeof(body), "{\"mv\":%d}", mv);
@@ -330,7 +386,6 @@ static void stop_server(void) {
 
 esp_err_t config_portal_run(void) {
     ESP_LOGI(TAG, "Starting config portal");
-    s_should_exit = false;
     s_idle_ticks = 0;
 
     esp_err_t err = start_softap();
@@ -338,13 +393,14 @@ esp_err_t config_portal_run(void) {
     err = start_http();
     if (err != ESP_OK) { stop_server(); return err; }
 
-    while (!s_should_exit && s_idle_ticks < PORTAL_TIMEOUT_SEC) {
+    // Only exit path is the idle timeout — handlers that change state
+    // (WiFi save, factory reset) call esp_restart() and never return.
+    while (s_idle_ticks < PORTAL_TIMEOUT_SEC) {
         vTaskDelay(pdMS_TO_TICKS(IDLE_TICK_MS));
         s_idle_ticks++;
     }
 
-    ESP_LOGI(TAG, "Portal exiting (timeout=%d should_exit=%d)",
-             s_idle_ticks >= PORTAL_TIMEOUT_SEC, s_should_exit);
+    ESP_LOGI(TAG, "Portal exiting (idle timeout)");
     stop_server();
     return ESP_OK;
 }

@@ -64,13 +64,11 @@ static char device_id_buffer[33] = {0};
 // MQTT credentials are defined in include/mqtt_credentials.h (not committed to git)
 // MQTT_BROKER_URI, MQTT_USERNAME, MQTT_PASSWORD, MQTT_TOPIC_PREFIX, MQTT_KEEPALIVE_SEC
 
-#define MQTT_BASE_TOPIC      MQTT_TOPIC_PREFIX           ///< Base topic (deprecated, uses prefix + device_id)x + device_id)
 #define MQTT_KEEPALIVE_SEC   10                          ///< MQTT keepalive interval in seconds
 #define DEFAULT_DEVICE_ID    "moisture01"                    ///< Fallback device ID if not provisioned
 #define WIFI_TIMEOUT_SEC     30                          ///< WiFi connection timeout before retry
 #define MQTT_WAIT_MS         3000                        ///< Time to wait for MQTT connection (milliseconds)
 #define PUBLISH_WAIT_MS      2000                        ///< Time to wait after publishing before sleep (milliseconds)
-#define PROVISIONING_TIMEOUT_SEC 600                     ///< Max time to keep SoftAP up before giving up and sleeping (10 min)
 
 // Deep Sleep Configuration
 #define DEEP_SLEEP_INTERVAL_SEC  3600                    ///< Deep sleep duration in seconds (3600 = 1 hour)
@@ -412,51 +410,6 @@ static esp_err_t publish_telemetry_once(void) {
     
     ESP_LOGI(TAG, "Telemetry published successfully");
     return ESP_OK;
-}
-
-// ============================================================================
-// Legacy Telemetry Loop (Not Used with Deep Sleep)
-// ============================================================================
-
-/**
- * @brief Main telemetry publishing loop (DEPRECATED - Using deep sleep instead)
- * 
- * This function is no longer used with deep sleep enabled.
- * Left for reference or if switching back to continuous operation.
- * 
- * Original behavior:
- * - Infinite loop checking factory reset and publishing telemetry
- * - Published every TELEMETRY_INTERVAL_MS
- * 
- * @deprecated Use publish_telemetry_once() + deep sleep instead
- */
-/**
- * @deprecated Use publish_telemetry_once() + deep sleep instead
- */
-static void telemetry_loop(void) {
-    ESP_LOGI(TAG, "Starting legacy telemetry loop (not used with deep sleep)");
-    
-    while (1) {
-        // Check if both WiFi and MQTT are connected
-        if (wifi_manager_is_connected() && mqtt_publisher_is_connected()) {
-            // Read battery voltage
-            float voltage = battery_monitor_read_voltage();
-            
-            // Read soil moisture (will return 0 if not initialized)
-            float soil_moisture = soil_moisture_read_percentage();
-            
-            // Publish telemetry using device ID
-            esp_err_t err = mqtt_publisher_publish_telemetry(voltage, soil_moisture, device_id_buffer);
-            if (err != ESP_OK) {
-                ESP_LOGW(TAG, "Failed to publish telemetry");
-            }
-        } else {
-            ESP_LOGW(TAG, "Not connected, skipping telemetry");
-        }
-        
-        // Wait for next interval (deprecated - using deep sleep instead)
-        vTaskDelay(pdMS_TO_TICKS(30000));  // 30 seconds
-    }
 }
 
 // ============================================================================

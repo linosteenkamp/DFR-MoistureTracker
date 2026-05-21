@@ -83,6 +83,7 @@ ESP32-C6 ADC units **cannot be initialized more than once**. `adc_manager` owns 
 | `config_portal` | `src/config_portal.c` | SoftAP (`FireBeetle_C6_Prov`) + HTTP portal (WiFi, calibration, status, factory reset) |
 | `form_parser` | `src/form_parser.c` | URL-encoded form field extraction (pure C, host-testable) |
 | `nvs_shim` | `src/nvs_shim_esp.c` | u32 wrapper around ESP NVS for host-testable modules |
+| `display` | `src/display.c` | Waveshare 2.13" e-paper driver (SSD1680) + framebuffer + dashboard / portal layouts |
 
 ### Key Configuration Constants (`src/main.c`)
 

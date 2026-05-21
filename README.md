@@ -11,6 +11,7 @@ Battery-powered ESP32-C6 IoT device with WiFi provisioning, soil moisture monito
 - **Config Portal**: SoftAP web UI for WiFi setup, sensor calibration, and factory reset — see [CONFIG_PORTAL.md](CONFIG_PORTAL.md)
 - **Soil Moisture Monitoring**: DFRobot capacitive sensor with calibration support
 - **Battery Monitoring**: ADC-based voltage reading with averaging
+- **E-paper Display**: Waveshare 2.13" e-paper hat shows telemetry and portal info — see [DISPLAY.md](DISPLAY.md)
 - **MQTT Publishing**: JSON telemetry to configurable topic
 - **Deep Sleep Mode**: Wakes hourly to publish telemetry, dramatically extending battery life
 - **Shared ADC Manager**: Efficient multi-sensor ADC resource management
@@ -212,6 +213,7 @@ Both battery monitor and soil moisture sensor share ADC1 through the ADC manager
 
 - **[DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md)** - Complete developer documentation for maintenance and extension
 - **[CONFIG_PORTAL.md](CONFIG_PORTAL.md)** - Config portal: WiFi setup, calibration, status, and factory reset
+- **[DISPLAY.md](DISPLAY.md)** - E-paper display: hardware wiring, telemetry/portal layouts, asset regeneration
 - **[SOIL_MOISTURE_SETUP.md](SOIL_MOISTURE_SETUP.md)** - Soil moisture sensor wiring and troubleshooting
 - **[BATTERY_MONITOR.md](BATTERY_MONITOR.md)** - Battery monitoring system, voltage interpretation, and technical details
 - **[PARTITIONS.md](PARTITIONS.md)** - Flash memory partition layout, NVS storage, and customization guide

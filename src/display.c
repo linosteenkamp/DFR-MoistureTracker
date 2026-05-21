@@ -305,6 +305,19 @@ static void draw_text_small_centered(int x0, int x1, int y, const char *s) {
 }
 
 // ============================================================================
+// Layouts
+// ============================================================================
+
+static void format_pct_1dp(char *buf, size_t n, float v) {
+    if (v < 0.0f) v = 0.0f;
+    if (v > 100.0f) v = 100.0f;
+    int whole = (int)v;
+    int frac  = (int)((v - whole) * 10.0f + 0.5f);
+    if (frac >= 10) { whole++; frac = 0; }
+    snprintf(buf, n, "%d.%d%%", whole, frac);
+}
+
+// ============================================================================
 // Public API (placeholders for layout — Tasks 5–7 fill the rendering in)
 // ============================================================================
 
@@ -367,8 +380,65 @@ esp_err_t display_init(void) {
 }
 
 void display_show_telemetry(const display_telemetry_t *t) {
-    (void)t;  // Layout rendering lands in Task 6.
-    fb_clear(0xFF);  // all-white for now
+    fb_clear(0xFF);  // white background
+
+    // Header: device ID, centered, with a divider below it.
+    if (t && t->device_id) {
+        draw_text_small_centered(0, DISPLAY_W, 4, t->device_id);
+    }
+    draw_hline(4, 16, DISPLAY_W - 8);
+
+    // Hero: moisture % centered. Up to "100.0%" = 6 chars after clamp.
+    char hero[8] = {0};
+    format_pct_1dp(hero, sizeof(hero), t ? t->moisture_pct : 0.0f);
+    int hero_w = (int)strlen(hero) * DISPLAY_FONT_LARGE_W;
+    int hero_x = (DISPLAY_W - hero_w) / 2;
+    if (hero_x < 0) hero_x = 0;
+    draw_text_large(hero_x, 30, hero);
+    draw_text_small_centered(0, DISPLAY_W, 70, "MOISTURE");
+
+    draw_hline(4, 90, DISPLAY_W - 8);
+
+    // Data rows: label on the left, value on the right.
+    char buf[20];
+    int row_y = 100;
+    int row_h = 14;
+
+    snprintf(buf, sizeof(buf), "%d mV", t ? t->raw_mv : 0);
+    draw_text_small(6, row_y, "Sensor");
+    {
+        int w = text_small_width(buf);
+        draw_text_small(DISPLAY_W - 6 - w, row_y, buf);
+    }
+    row_y += row_h;
+
+    snprintf(buf, sizeof(buf), "%.2f V", t ? (double)t->battery_v : 0.0);
+    draw_text_small(6, row_y, "Battery");
+    {
+        int w = text_small_width(buf);
+        draw_text_small(DISPLAY_W - 6 - w, row_y, buf);
+    }
+    row_y += row_h;
+
+    snprintf(buf, sizeof(buf), "%d %%", t ? t->battery_pct : 0);
+    draw_text_small(6, row_y, "Bat %");
+    {
+        int w = text_small_width(buf);
+        draw_text_small(DISPLAY_W - 6 - w, row_y, buf);
+    }
+    row_y += row_h;
+
+    if (t && t->wifi_rssi_dbm != 0) {
+        snprintf(buf, sizeof(buf), "%d dBm", t->wifi_rssi_dbm);
+    } else {
+        snprintf(buf, sizeof(buf), "--");
+    }
+    draw_text_small(6, row_y, "WiFi");
+    {
+        int w = text_small_width(buf);
+        draw_text_small(DISPLAY_W - 6 - w, row_y, buf);
+    }
+
     panel_refresh_full();
 }
 

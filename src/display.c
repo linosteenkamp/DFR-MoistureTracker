@@ -206,6 +206,105 @@ static void fb_clear(uint8_t fill) {
 }
 
 // ============================================================================
+// Drawing primitives
+// ============================================================================
+
+// Coordinate convention: (0, 0) is top-left. x in [0, 121], y in [0, 249].
+// Each byte in the framebuffer holds 8 horizontal pixels, MSB on the left.
+// Bit value 0 = black pixel (drawn), 1 = white (background).
+
+static inline void draw_pixel(int x, int y, bool on) {
+    if (x < 0 || x >= DISPLAY_W || y < 0 || y >= DISPLAY_H_PX) return;
+    uint8_t mask = 0x80 >> (x & 7);
+    size_t idx = y * DISPLAY_BPR + (x >> 3);
+    if (on) {
+        s_fb[idx] &= ~mask;  // clear bit = black
+    } else {
+        s_fb[idx] |= mask;
+    }
+}
+
+static void draw_hline(int x, int y, int w) {
+    for (int i = 0; i < w; i++) {
+        draw_pixel(x + i, y, true);
+    }
+}
+
+// Draw a 1-bit bitmap at (x, y). Bytes are MSB-first within a row.
+// A 1 bit in the bitmap means "draw black pixel" (matches the asset
+// generator's output format).
+static void draw_bitmap(int x, int y, const uint8_t *bm, int w, int h) {
+    int bpr = (w + 7) / 8;
+    for (int row = 0; row < h; row++) {
+        for (int col = 0; col < w; col++) {
+            uint8_t byte = bm[row * bpr + (col >> 3)];
+            bool on = byte & (0x80 >> (col & 7));
+            if (on) {
+                draw_pixel(x + col, y + row, true);
+            }
+        }
+    }
+}
+
+// Render one small-font glyph at (x, y). Unsupported chars render as blank.
+static void draw_glyph_small(int x, int y, char ch) {
+    int idx = (int)(unsigned char)ch - DISPLAY_FONT_SMALL_FIRST;
+    if (idx < 0 || idx >= DISPLAY_FONT_SMALL_COUNT) {
+        return;
+    }
+    int glyph_bytes = ((DISPLAY_FONT_SMALL_W + 7) / 8) * DISPLAY_FONT_SMALL_H;
+    const uint8_t *bm = &display_font_small[idx * glyph_bytes];
+    draw_bitmap(x, y, bm, DISPLAY_FONT_SMALL_W, DISPLAY_FONT_SMALL_H);
+}
+
+static void draw_text_small(int x, int y, const char *s) {
+    int cx = x;
+    for (; *s; s++) {
+        draw_glyph_small(cx, y, *s);
+        cx += DISPLAY_FONT_SMALL_W;
+    }
+}
+
+// Large-font lookup: walk DISPLAY_FONT_LARGE_CHARS to find the index.
+static int large_index_of(char ch) {
+    for (int i = 0; DISPLAY_FONT_LARGE_CHARS[i]; i++) {
+        if (DISPLAY_FONT_LARGE_CHARS[i] == ch) return i;
+    }
+    return -1;
+}
+
+static void draw_glyph_large(int x, int y, char ch) {
+    int idx = large_index_of(ch);
+    if (idx < 0) return;
+    int glyph_bytes = ((DISPLAY_FONT_LARGE_W + 7) / 8) * DISPLAY_FONT_LARGE_H;
+    const uint8_t *bm = &display_font_large[idx * glyph_bytes];
+    draw_bitmap(x, y, bm, DISPLAY_FONT_LARGE_W, DISPLAY_FONT_LARGE_H);
+}
+
+static void draw_text_large(int x, int y, const char *s) {
+    int cx = x;
+    for (; *s; s++) {
+        draw_glyph_large(cx, y, *s);
+        cx += DISPLAY_FONT_LARGE_W;
+    }
+}
+
+// Helper: measure small-font text width
+static int text_small_width(const char *s) {
+    int n = 0;
+    while (*s++) n++;
+    return n * DISPLAY_FONT_SMALL_W;
+}
+
+// Helper: draw small text centered in a horizontal range [x0, x1)
+static void draw_text_small_centered(int x0, int x1, int y, const char *s) {
+    int w = text_small_width(s);
+    int x = x0 + ((x1 - x0) - w) / 2;
+    if (x < x0) x = x0;
+    draw_text_small(x, y, s);
+}
+
+// ============================================================================
 // Public API (placeholders for layout — Tasks 5–7 fill the rendering in)
 // ============================================================================
 

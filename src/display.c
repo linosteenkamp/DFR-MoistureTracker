@@ -428,23 +428,40 @@ esp_err_t display_init(void) {
         return err;
     }
 
-    // Probe for the panel: pulse RST and look for BUSY going HIGH. A real
-    // SSD1680 holds BUSY HIGH for ~5–15 ms while processing the reset. With
-    // the internal pull-down on the BUSY pin (set above), a missing display
-    // reads LOW. Bail early so the 5-second wait_busy timeouts in panel_init
-    // don't burn battery on display-less devices.
+    // Probe for the panel: pulse RST then SW_RESET, polling BUSY for a
+    // HIGH transition. A real SSD1680 raises BUSY HIGH for ~10 ms while
+    // processing each reset. With the internal pull-down on BUSY (set
+    // above), a missing display reads LOW. Poll at 10 ms increments
+    // (default FreeRTOS tick is 10 ms; sub-tick delays become no-ops).
     gpio_set_level(PIN_RST, 0);
-    vTaskDelay(pdMS_TO_TICKS(2));
+    vTaskDelay(pdMS_TO_TICKS(10));
     gpio_set_level(PIN_RST, 1);
-    vTaskDelay(pdMS_TO_TICKS(1));
-    if (gpio_get_level(PIN_BUSY) == 0) {
-        ESP_LOGI(TAG, "No e-paper detected — skipping display");
+
+    bool detected = false;
+    // Watch BUSY for ~200 ms after RST rises (20 * 10 ms ticks). Panel's
+    // POR sequence may or may not assert BUSY, depending on revision.
+    for (int i = 0; i < 20 && !detected; i++) {
+        if (gpio_get_level(PIN_BUSY) == 1) detected = true;
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if (!detected) {
+        // HW reset alone didn't trigger BUSY. Try SW_RESET — that command
+        // is documented to raise BUSY for ~10 ms on a real SSD1680.
+        send_cmd(CMD_SW_RESET);
+        for (int i = 0; i < 20 && !detected; i++) {
+            if (gpio_get_level(PIN_BUSY) == 1) detected = true;
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+    if (!detected) {
+        ESP_LOGI(TAG, "No e-paper detected (BUSY stuck %d) — skipping display",
+                 gpio_get_level(PIN_BUSY));
         spi_bus_remove_device(s_spi);
         s_spi = NULL;
         return ESP_ERR_NOT_FOUND;
     }
 
-    panel_init();
+    panel_init();   // does its own reset+config; slight duplication, harmless
     return ESP_OK;
 }
 

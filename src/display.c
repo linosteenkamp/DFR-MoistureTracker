@@ -384,11 +384,14 @@ esp_err_t display_init(void) {
     };
     gpio_config(&io);
 
+    // Pull-down enabled so a missing display (BUSY pin floating) reads LOW.
+    // A real SSD1680 actively drives BUSY HIGH while processing a reset; the
+    // weak internal pull-down (~45 kΩ) doesn't fight the panel's drive.
     gpio_config_t busy = {
         .pin_bit_mask = (1ULL << PIN_BUSY),
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_ENABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
     gpio_config(&busy);
@@ -423,6 +426,22 @@ esp_err_t display_init(void) {
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "spi_bus_add_device failed: %d", err);
         return err;
+    }
+
+    // Probe for the panel: pulse RST and look for BUSY going HIGH. A real
+    // SSD1680 holds BUSY HIGH for ~5–15 ms while processing the reset. With
+    // the internal pull-down on the BUSY pin (set above), a missing display
+    // reads LOW. Bail early so the 5-second wait_busy timeouts in panel_init
+    // don't burn battery on display-less devices.
+    gpio_set_level(PIN_RST, 0);
+    vTaskDelay(pdMS_TO_TICKS(2));
+    gpio_set_level(PIN_RST, 1);
+    vTaskDelay(pdMS_TO_TICKS(1));
+    if (gpio_get_level(PIN_BUSY) == 0) {
+        ESP_LOGI(TAG, "No e-paper detected — skipping display");
+        spi_bus_remove_device(s_spi);
+        s_spi = NULL;
+        return ESP_ERR_NOT_FOUND;
     }
 
     panel_init();

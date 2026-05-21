@@ -109,7 +109,7 @@ All pins are non-strapping and free of conflicts with the existing battery (GPIO
 | CLK (SCK) | GPIO23 | output | SPI2 SCK |
 | CS | GPIO1 | output | active LOW |
 | DC | GPIO19 | output | re-pinned from initial GPIO8 to avoid the strapping-pin risk |
-| RST | GPIO14 | output | active LOW pulse during `display_init` |
+| RST | GPIO18 | output | active LOW pulse during `display_init` |
 | BUSY | GPIO4 | input | active HIGH while panel is mid-refresh |
 
 ### Refresh strategy

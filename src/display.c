@@ -5,7 +5,7 @@
  * Pinout (matches the spec):
  *   MOSI  GPIO22   CS    GPIO1
  *   SCK   GPIO23   DC    GPIO19
- *   BUSY  GPIO4    RST   GPIO14
+ *   BUSY  GPIO4    RST   GPIO18
  *
  * Layout: portrait 122 x 250 px. Framebuffer is 16 bytes wide
  * (ceil(122 / 8)) by 250 tall = 4000 bytes.
@@ -48,7 +48,7 @@ static const char *TAG = "DISPLAY";
 #define PIN_SCK     23
 #define PIN_CS       1
 #define PIN_DC      19
-#define PIN_RST     14
+#define PIN_RST     18
 #define PIN_BUSY     4
 
 #define DISPLAY_W    122
@@ -265,6 +265,50 @@ static void draw_text_small(int x, int y, const char *s) {
     }
 }
 
+// 2x-scaled small font: pixel-double each glyph into a 12x16 cell.
+// Used for the device-name header where the 6x8 small font looks cramped.
+static void draw_glyph_small_2x(int x, int y, char ch) {
+    int idx = (int)(unsigned char)ch - DISPLAY_FONT_SMALL_FIRST;
+    if (idx < 0 || idx >= DISPLAY_FONT_SMALL_COUNT) return;
+    int bpr = (DISPLAY_FONT_SMALL_W + 7) / 8;
+    int glyph_bytes = bpr * DISPLAY_FONT_SMALL_H;
+    const uint8_t *bm = &display_font_small[idx * glyph_bytes];
+    for (int row = 0; row < DISPLAY_FONT_SMALL_H; row++) {
+        for (int col = 0; col < DISPLAY_FONT_SMALL_W; col++) {
+            uint8_t byte = bm[row * bpr + (col >> 3)];
+            if (byte & (0x80 >> (col & 7))) {
+                int px = x + col * 2;
+                int py = y + row * 2;
+                draw_pixel(px,     py,     true);
+                draw_pixel(px + 1, py,     true);
+                draw_pixel(px,     py + 1, true);
+                draw_pixel(px + 1, py + 1, true);
+            }
+        }
+    }
+}
+
+static void draw_text_small_2x(int x, int y, const char *s) {
+    int cx = x;
+    for (; *s; s++) {
+        draw_glyph_small_2x(cx, y, *s);
+        cx += DISPLAY_FONT_SMALL_W * 2;
+    }
+}
+
+static int text_small_2x_width(const char *s) {
+    int n = 0;
+    while (*s++) n++;
+    return n * DISPLAY_FONT_SMALL_W * 2;
+}
+
+static void draw_text_small_2x_centered(int x0, int x1, int y, const char *s) {
+    int w = text_small_2x_width(s);
+    int x = x0 + ((x1 - x0) - w) / 2;
+    if (x < x0) x = x0;
+    draw_text_small_2x(x, y, s);
+}
+
 // Large-font lookup: walk DISPLAY_FONT_LARGE_CHARS to find the index.
 static int large_index_of(char ch) {
     for (int i = 0; DISPLAY_FONT_LARGE_CHARS[i]; i++) {
@@ -314,7 +358,13 @@ static void format_pct_1dp(char *buf, size_t n, float v) {
     int whole = (int)v;
     int frac  = (int)((v - whole) * 10.0f + 0.5f);
     if (frac >= 10) { whole++; frac = 0; }
-    snprintf(buf, n, "%d.%d%%", whole, frac);
+    // At 100% the "100.0%" string is 6 large-font glyphs = 144 px > 122 px
+    // display width. Drop the decimal in that single case.
+    if (whole >= 100) {
+        snprintf(buf, n, "%d%%", whole);
+    } else {
+        snprintf(buf, n, "%d.%d%%", whole, frac);
+    }
 }
 
 // ============================================================================
@@ -382,20 +432,32 @@ esp_err_t display_init(void) {
 void display_show_telemetry(const display_telemetry_t *t) {
     fb_clear(0xFF);  // white background
 
-    // Header: device ID, centered, with a divider below it.
-    if (t && t->device_id) {
-        draw_text_small_centered(0, DISPLAY_W, 4, t->device_id);
+    // Header: device ID in 2x small font, centered. Strip the "tree-" prefix
+    // — it's the convention for all device names in this deployment and is
+    // redundant on a per-device screen. Uppercase the result because the 2x
+    // pixel-doubled small font has cramped descenders on lowercase letters.
+    const char *src = (t && t->device_id) ? t->device_id : "";
+    if (strncmp(src, "tree-", 5) == 0) src += 5;
+    char upper_name[33];
+    size_t i = 0;
+    for (; i + 1 < sizeof(upper_name) && src[i]; i++) {
+        char c = src[i];
+        if (c >= 'a' && c <= 'z') c -= 32;
+        upper_name[i] = c;
     }
-    draw_hline(4, 16, DISPLAY_W - 8);
+    upper_name[i] = '\0';
+    draw_text_small_2x_centered(0, DISPLAY_W, 4, upper_name);
+    draw_hline(4, 24, DISPLAY_W - 8);
 
-    // Hero: moisture % centered. Up to "100.0%" = 6 chars after clamp.
+    // Hero: moisture % centered. format_pct_1dp drops the decimal at 100%
+    // so the worst case is "99.9%" (5 large glyphs = 120 px, fits in 122).
     char hero[8] = {0};
     format_pct_1dp(hero, sizeof(hero), t ? t->moisture_pct : 0.0f);
     int hero_w = (int)strlen(hero) * DISPLAY_FONT_LARGE_W;
     int hero_x = (DISPLAY_W - hero_w) / 2;
     if (hero_x < 0) hero_x = 0;
-    draw_text_large(hero_x, 30, hero);
-    draw_text_small_centered(0, DISPLAY_W, 70, "MOISTURE");
+    draw_text_large(hero_x, 36, hero);
+    draw_text_small_centered(0, DISPLAY_W, 74, "MOISTURE");
 
     draw_hline(4, 90, DISPLAY_W - 8);
 
@@ -405,7 +467,7 @@ void display_show_telemetry(const display_telemetry_t *t) {
     int row_h = 14;
 
     snprintf(buf, sizeof(buf), "%d mV", t ? t->raw_mv : 0);
-    draw_text_small(6, row_y, "Sensor");
+    draw_text_small(6, row_y, "SENSOR");
     {
         int w = text_small_width(buf);
         draw_text_small(DISPLAY_W - 6 - w, row_y, buf);
@@ -413,7 +475,7 @@ void display_show_telemetry(const display_telemetry_t *t) {
     row_y += row_h;
 
     snprintf(buf, sizeof(buf), "%.2f V", t ? (double)t->battery_v : 0.0);
-    draw_text_small(6, row_y, "Battery");
+    draw_text_small(6, row_y, "BATTERY");
     {
         int w = text_small_width(buf);
         draw_text_small(DISPLAY_W - 6 - w, row_y, buf);
@@ -421,7 +483,7 @@ void display_show_telemetry(const display_telemetry_t *t) {
     row_y += row_h;
 
     snprintf(buf, sizeof(buf), "%d %%", t ? t->battery_pct : 0);
-    draw_text_small(6, row_y, "Bat %");
+    draw_text_small(6, row_y, "BAT %");
     {
         int w = text_small_width(buf);
         draw_text_small(DISPLAY_W - 6 - w, row_y, buf);
@@ -433,7 +495,7 @@ void display_show_telemetry(const display_telemetry_t *t) {
     } else {
         snprintf(buf, sizeof(buf), "--");
     }
-    draw_text_small(6, row_y, "WiFi");
+    draw_text_small(6, row_y, "WIFI");
     {
         int w = text_small_width(buf);
         draw_text_small(DISPLAY_W - 6 - w, row_y, buf);
@@ -449,10 +511,11 @@ void display_show_portal(void) {
     draw_text_small_centered(0, DISPLAY_W, 6, "CONFIGURE");
     draw_hline(4, 18, DISPLAY_W - 8);
 
-    // SSID + URL, two pairs of lines, both centered
-    draw_text_small_centered(0, DISPLAY_W, 28, "Connect to:");
+    // SSID + URL, two pairs of lines, both centered.
+    // SSID and URL kept verbatim — phones do case-sensitive SSID matching.
+    draw_text_small_centered(0, DISPLAY_W, 28, "CONNECT TO:");
     draw_text_small_centered(0, DISPLAY_W, 40, "FireBeetle_C6_Prov");
-    draw_text_small_centered(0, DISPLAY_W, 56, "Open in browser:");
+    draw_text_small_centered(0, DISPLAY_W, 56, "OPEN IN BROWSER:");
     draw_text_small_centered(0, DISPLAY_W, 68, "http://192.168.4.1");
 
     // QR bitmap, centered horizontally, below the URL text.
@@ -461,7 +524,7 @@ void display_show_portal(void) {
     draw_bitmap(qr_x, qr_y, display_qr, DISPLAY_QR_W, DISPLAY_QR_H);
 
     // Hint at the bottom
-    draw_text_small_centered(0, DISPLAY_W, qr_y + DISPLAY_QR_H + 8, "scan to configure");
+    draw_text_small_centered(0, DISPLAY_W, qr_y + DISPLAY_QR_H + 8, "SCAN TO CONFIGURE");
 
     panel_refresh_full();
 }

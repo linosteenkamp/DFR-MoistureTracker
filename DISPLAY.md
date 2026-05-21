@@ -12,7 +12,7 @@ A Waveshare 2.13" e-paper hat (SSD1680 controller, 122 × 250 px portrait, 1-bit
 | CLK (SCK) | GPIO23 | output |
 | CS | GPIO1 | output |
 | DC | GPIO19 | output |
-| RST | GPIO14 | output |
+| RST | GPIO18 | output |
 | BUSY | GPIO4 | input |
 
 VCC stays on the 3V3 rail at all times — e-paper retains its image with no current, so there is no need to gate power.

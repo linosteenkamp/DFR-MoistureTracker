@@ -106,13 +106,13 @@ void wifi_manager_stop(void) {
 
 bool wifi_manager_wait_connected(int timeout_sec) {
     ESP_LOGI(TAG, "Waiting for WiFi connection (timeout: %d seconds)", timeout_sec);
-    
+
     int elapsed = 0;
     while (!wifi_connected && elapsed < timeout_sec) {
         vTaskDelay(pdMS_TO_TICKS(1000));
         elapsed++;
     }
-    
+
     if (wifi_connected) {
         ESP_LOGI(TAG, "WiFi connected successfully");
         return true;
@@ -120,4 +120,12 @@ bool wifi_manager_wait_connected(int timeout_sec) {
         ESP_LOGE(TAG, "WiFi connection timeout");
         return false;
     }
+}
+
+int wifi_manager_get_rssi(void) {
+    wifi_ap_record_t ap;
+    if (esp_wifi_sta_get_ap_info(&ap) != ESP_OK) {
+        return 0;
+    }
+    return ap.rssi;
 }

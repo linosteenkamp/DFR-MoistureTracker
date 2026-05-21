@@ -443,8 +443,26 @@ void display_show_telemetry(const display_telemetry_t *t) {
 }
 
 void display_show_portal(void) {
-    // Layout rendering lands in Task 7.
     fb_clear(0xFF);
+
+    // Header
+    draw_text_small_centered(0, DISPLAY_W, 6, "CONFIGURE");
+    draw_hline(4, 18, DISPLAY_W - 8);
+
+    // SSID + URL, two pairs of lines, both centered
+    draw_text_small_centered(0, DISPLAY_W, 28, "Connect to:");
+    draw_text_small_centered(0, DISPLAY_W, 40, "FireBeetle_C6_Prov");
+    draw_text_small_centered(0, DISPLAY_W, 56, "Open in browser:");
+    draw_text_small_centered(0, DISPLAY_W, 68, "http://192.168.4.1");
+
+    // QR bitmap, centered horizontally, below the URL text.
+    int qr_x = (DISPLAY_W - DISPLAY_QR_W) / 2;
+    int qr_y = 90;
+    draw_bitmap(qr_x, qr_y, display_qr, DISPLAY_QR_W, DISPLAY_QR_H);
+
+    // Hint at the bottom
+    draw_text_small_centered(0, DISPLAY_W, qr_y + DISPLAY_QR_H + 8, "scan to configure");
+
     panel_refresh_full();
 }
 

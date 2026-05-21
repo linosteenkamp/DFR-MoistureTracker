@@ -3,6 +3,7 @@ idf_component_register(
         "adc_manager.c"
         "battery_monitor.c"
         "config_portal.c"
+        "display.c"
         "form_parser.c"
         "main.c"
         "mqtt_publisher.c"

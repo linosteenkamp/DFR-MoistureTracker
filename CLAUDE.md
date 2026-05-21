@@ -67,7 +67,7 @@ ESP32-C6 ADC units **cannot be initialized more than once**. `adc_manager` owns 
 
 - `adc_manager_init()` — called first in `init_system()`
 - `adc_manager_get_handle()` — used by both battery monitor and soil moisture
-- Adding a third ADC sensor: use `ADC_CHANNEL_4` (or higher, see `SOIL_MOISTURE_SETUP.md` for free channels) via the same shared handle — do not create a second unit
+- Adding a third ADC sensor: GPIO4/ADC1_CH4 is **no longer free** (display BUSY). Use `ADC_CHANNEL_1`, `_5`, or `_6` (GPIO1 is the display CS — no longer free either; GPIO5/6 are still free). See `SOIL_MOISTURE_SETUP.md` for the full pinout. Use the shared `adc_manager` handle — do not create a second unit
 
 ### Module Responsibilities
 

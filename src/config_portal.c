@@ -61,6 +61,20 @@ static const char *html_wifi_saved =
     "<!DOCTYPE html><html><body><h1>WiFi saved.</h1>"
     "<p>Device will restart in 2 seconds.</p></body></html>";
 
+// Shown after first-boot WiFi save when no calibration has been captured yet.
+// Linear flow: WiFi save -> calibrate -> restart (in api_calibrate_save).
+static const char *html_wifi_saved_next_step =
+    "<!DOCTYPE html><html><head><title>WiFi saved</title>"
+    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<style>body{font-family:Arial;margin:40px;background:#f0f0f0}"
+    ".c{background:white;padding:30px;border-radius:10px;max-width:400px;margin:auto;text-align:center}"
+    "a.btn{display:block;padding:14px;margin:14px 0;background:#4CAF50;color:white;"
+    "text-decoration:none;border-radius:4px;font-size:16px}</style></head>"
+    "<body><div class='c'><h2>WiFi saved \xE2\x9C\x93</h2>"
+    "<p>One more step \xE2\x80\x94 calibrate the sensor so readings are accurate.</p>"
+    "<a class='btn' href='/calibrate'>Calibrate Sensor \xE2\x86\x92</a>"
+    "</div></body></html>";
+
 static const char *html_calibrate =
     "<!DOCTYPE html><html><head><title>Calibrate</title>"
     "<meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -88,8 +102,10 @@ static const char *html_calibrate =
     "if(!r.ok){document.getElementById(k).textContent='read failed — check wiring';return;}"
     "let j=await r.json();document.getElementById(k).textContent='captured: '+j.mv+' mV';}"
     "async function save(){let r=await fetch('/api/calibrate/save',{method:'POST'});"
-    "if(r.ok){document.body.innerHTML='<h1>Saved.</h1>';setTimeout(()=>location.href='/',1500);}"
-    "else{alert('Capture both DRY and WET first.');}}"
+    "if(!r.ok){alert('Capture both DRY and WET first.');return;}"
+    "let j=await r.json();"
+    "document.body.innerHTML=j.restart?'<h1>Saved. Restarting\xE2\x80\xA6</h1>':'<h1>Saved.</h1>';"
+    "if(!j.restart)setTimeout(()=>location.href='/',1500);}"
     "</script></body></html>";
 
 static const char *html_reset_confirm =
@@ -195,7 +211,14 @@ static esp_err_t wifi_post(httpd_req_t *req) {
     if (wifi_credentials_save(ssid, password_to_save) != ESP_OK) { httpd_resp_send_500(req); return ESP_FAIL; }
     if (wifi_credentials_save_device_id(device_id) != ESP_OK) { httpd_resp_send_500(req); return ESP_FAIL; }
 
+    // First-boot flow: if no calibration has been captured yet, don't restart
+    // — send the user to /calibrate first. api_calibrate_save will restart
+    // after the first calibration lands. Return visits (cal_ts != 0) keep
+    // the original instant-restart behaviour.
     httpd_resp_set_type(req, "text/html");
+    if (soil_calibration_get_cal_ts() == 0) {
+        return httpd_resp_send(req, html_wifi_saved_next_step, HTTPD_RESP_USE_STRLEN);
+    }
     httpd_resp_send(req, html_wifi_saved, HTTPD_RESP_USE_STRLEN);
     vTaskDelay(pdMS_TO_TICKS(2000));
     esp_restart();
@@ -255,12 +278,27 @@ static esp_err_t api_calibrate_save(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "capture dry and wet first");
         return ESP_FAIL;
     }
-    uint32_t ts = (uint32_t)(esp_timer_get_time() / 1000000);  // seconds since boot
+    // First-boot detection: if no prior calibration, restart after this save
+    // so the device joins WiFi and starts publishing telemetry. On re-cal
+    // trips we stay in the portal so the user can keep using it.
+    bool was_first_cal = (soil_calibration_get_cal_ts() == 0);
+    // esp_timer_get_time() / 1e6 is always > 0 after init; clamp to 1 so
+    // cal_ts can never collide with the "never calibrated" sentinel.
+    uint32_t ts = (uint32_t)(esp_timer_get_time() / 1000000);
+    if (ts == 0) ts = 1;
     bool ok = soil_calibration_save(
         (uint32_t)s_pending_dry_mv, (uint32_t)s_pending_wet_mv, ts);
     if (!ok) { httpd_resp_send_500(req); return ESP_FAIL; }
+
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, "{\"ok\":true}", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send(req,
+        was_first_cal ? "{\"ok\":true,\"restart\":true}" : "{\"ok\":true}",
+        HTTPD_RESP_USE_STRLEN);
+    if (was_first_cal) {
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        esp_restart();
+    }
+    return ESP_OK;
 }
 
 static esp_err_t status_get(httpd_req_t *req) {

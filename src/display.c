@@ -46,10 +46,10 @@ static const char *TAG = "DISPLAY";
 
 #define PIN_MOSI    22
 #define PIN_SCK     23
-#define PIN_CS       1
-#define PIN_DC      19
-#define PIN_RST     18
-#define PIN_BUSY     4
+#define PIN_CS      18
+#define PIN_DC       1
+#define PIN_RST     14
+#define PIN_BUSY     8
 
 #define DISPLAY_W    122
 #define DISPLAY_H_PX 250

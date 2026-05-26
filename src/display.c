@@ -11,6 +11,8 @@
  * (ceil(122 / 8)) by 250 tall = 4000 bytes.
  */
 
+#include "battery_soc.h"
+
 #ifndef TEST_HOST
 #include "display.h"
 #include "display_assets.h"
@@ -27,9 +29,7 @@
 // ============================================================================
 
 int display_battery_v_to_pct(float v) {
-    if (v <= 3.3f) return 0;
-    if (v >= 4.2f) return 100;
-    float pct = (v - 3.3f) * (100.0f / 0.9f);
+    float pct = battery_monitor_v_to_pct(v);
     int i = (int)(pct + 0.5f);
     if (i < 0) return 0;
     if (i > 100) return 100;

@@ -332,22 +332,29 @@ if (err != ESP_OK) {
 - [ ] Battery voltage reads correctly (verify with multimeter)
 - [ ] Soil moisture reads 0% in air
 - [ ] Soil moisture reads ~100% in water
-- [ ] MQTT publishes every 30 seconds
+- [ ] MQTT publishes once per wake (1 hour interval in deep-sleep mode; or every ~5 s under `-DDISABLE_DEEP_SLEEP` for bench testing)
 - [ ] Device reconnects after WiFi loss
 - [ ] Device handles MQTT broker disconnect
 
 ### Serial Monitor Validation
 
-Look for successful initialization sequence:
+Look for successful initialization sequence on a timer wake (abbreviated; ESP-IDF `wifi:` lines omitted for brevity):
 ```
-I MAIN: === FireBeetle ESP32-C6 Application Starting ===
-I ADC_MGR: ADC manager initialized
+I MAIN: === DFR-MoistureTracker Starting ===
+I MAIN: Wake from deep sleep - initializing...
+I MAIN: Wake cause: Timer
+I MAIN: ADC manager initialized
 I BATTERY: Battery monitor initialized on ADC1 Channel 0
-I SOIL_MOISTURE: Soil moisture sensor initialized on ADC1 Channel 1
-I MAIN: WiFi connected successfully
+I SOIL_MOISTURE: Soil moisture sensor initialized on ADC1 Channel 2
+I MAIN: OCV: 4.210V (100% SoC)
+I WIFI_MGR: WiFi connected successfully
 I MQTT_PUB: MQTT connected
-I MAIN: === Application Ready ===
+I MAIN: === Initialization Complete ===
+I MAIN: Publishing telemetry: Battery=4.21V, Moisture=1.4%
+I MAIN: Entering deep sleep for 3600 seconds (60 minutes)
 ```
+
+The `OCV:` line **must appear before** any `wifi:` lines — that's the zero-load sampling property.
 
 ### Battery Sampling — Bench Verification
 
@@ -367,17 +374,21 @@ After flashing changes to battery_monitor / main, verify on the bench supply:
 
 ### Power Consumption
 
-Current implementation (always-on):
-- WiFi active: ~80mA
-- MQTT keepalive: ~5mA average
-- ADC readings: ~2mA for 100ms
-- **Total**: ~85mA average
+Active-window characteristics (during the ~5 s wake):
+- WiFi active: ~80 mA
+- MQTT keepalive: ~5 mA average
+- ADC readings: ~2 mA for 100 ms
+- **Peak**: ~85 mA
 
-With deep sleep (5 min intervals):
-- Active time: ~5 seconds = ~85mA × 5s = 0.118mAh
-- Sleep current: ~10µA × 295s = 0.0008mAh
-- **Average**: ~0.14mAh per 5 minutes = ~1.7mA average
-- **Battery life**: 2000mAh / 1.7mA ≈ 49 days
+With deep sleep (1 hour intervals, current configuration):
+- Active: ~5 s × ~85 mA ≈ 0.118 mAh per wake
+- Sleep: 3595 s × ~10 µA ≈ 0.010 mAh per hour
+- **Average draw**: ~0.13 mAh / hour ≈ ~130 µA
+- **Theoretical battery life** (2000 mAh cell, ignoring self-discharge): ~640 days
+
+Real-world life is shorter: LiPo self-discharge (~3 %/month), WiFi retries on weak signal, brownout events, and capacity loss with age all eat into this. A realistic estimate at moderate signal strength is several months to a year on a 2000 mAh cell.
+
+If the cell drops below `BATTERY_LOW_CUTOFF_V` (3.70 V), the firmware skips WiFi entirely on subsequent wakes — sleep current is unchanged but per-wake cost drops to just the ADC sample, extending life on a starving cell.
 
 ### Memory Usage
 

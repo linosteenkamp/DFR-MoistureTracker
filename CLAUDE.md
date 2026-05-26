@@ -56,10 +56,11 @@ cp include/mqtt_credentials.h.example include/mqtt_credentials.h
 `app_main()` runs on every wake. Each wake is a full reboot — there is no persistent state in RAM (only NVS and RTC memory survive sleep):
 
 1. `init_system()` — NVS flash, TCP/IP stack, event loop, ADC manager, factory reset GPIO, sensors
-2. `setup_wifi()` — checks NVS for credentials; enters provisioning (SoftAP + HTTP) if none found
-3. `setup_mqtt()` — reads device ID from NVS, constructs topic `zigbee2mqtt/{device_id}`, connects to broker
-4. `publish_telemetry_once()` — reads battery voltage + soil moisture, publishes JSON, waits 2s for delivery
-5. `enter_deep_sleep(3600)` — timer wakeup after 1 hour; does not return
+2. **Early OCV sample** — `battery_monitor_read_voltage()` runs *before* WiFi energizes (zero-load reading). If cell < `BATTERY_LOW_CUTOFF_V` (3.70 V), draws a one-shot low-battery warning on the e-paper (latched in RTC memory so subsequent wakes skip the redraw) and sleeps without touching WiFi. Otherwise the OCV is cached in `g_cached_battery_v` for step 5.
+3. `setup_wifi()` — checks NVS for credentials; enters provisioning (SoftAP + HTTP) if none found
+4. `setup_mqtt()` — reads device ID from NVS, constructs topic `zigbee2mqtt/{device_id}`, connects to broker
+5. `publish_telemetry_once()` — reads soil moisture, reuses the pre-sampled OCV (not a fresh under-load read), publishes JSON, waits 2s for delivery
+6. `enter_deep_sleep(3600)` — timer wakeup after 1 hour; does not return
 
 ### ADC Resource Sharing (Critical Constraint)
 
@@ -76,14 +77,14 @@ ESP32-C6 ADC units **cannot be initialized more than once**. `adc_manager` owns 
 | `adc_manager` | `src/adc_manager.c` | Shared ADC1 handle — must init first |
 | `wifi_credentials` | `src/wifi_credentials.c` | NVS read/write for SSID, password, device ID |
 | `wifi_manager` | `src/wifi_manager.c` | WiFi STA connection and status |
-| `battery_monitor` | `src/battery_monitor.c` | ADC1 CH0 (GPIO 0) — 2:1 voltage divider |
+| `battery_monitor` | `src/battery_monitor.c` | ADC1 CH0 (GPIO 0) — 2:1 voltage divider. Also hosts the pure 11-point LiPo SoC curve (`battery_monitor_v_to_pct`) and brownout-cutoff check (`battery_monitor_is_safe`); both declared in host-safe `include/battery_soc.h` |
 | `soil_moisture` | `src/soil_moisture.c` | ADC1 CH2 (GPIO 2) for AOUT, GPIO 3 as switched VCC — sensor is only powered during read |
 | `mqtt_publisher` | `src/mqtt_publisher.c` | MQTT client lifecycle and JSON telemetry |
 | `soil_calibration` | `src/soil_calibration.c` | NVS-backed runtime dry/wet mV values (namespace `soil_cal`) — sane defaults if missing |
 | `config_portal` | `src/config_portal.c` | SoftAP (`FireBeetle_C6_Prov`) + HTTP portal (WiFi, calibration, status, factory reset) |
 | `form_parser` | `src/form_parser.c` | URL-encoded form field extraction (pure C, host-testable) |
 | `nvs_shim` | `src/nvs_shim_esp.c` | u32 wrapper around ESP NVS for host-testable modules |
-| `display` | `src/display.c` | Waveshare 2.13" e-paper driver (SSD1680) + framebuffer + dashboard / portal layouts |
+| `display` | `src/display.c` | Waveshare 2.13" e-paper driver (SSD1680) + framebuffer + dashboard / portal / low-battery layouts |
 
 ### Key Configuration Constants (`src/main.c`)
 

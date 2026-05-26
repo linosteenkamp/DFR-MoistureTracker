@@ -565,6 +565,24 @@ void display_show_portal(void) {
     panel_refresh_full();
 }
 
+void display_show_low_battery(float volts) {
+    fb_clear(0xFF);  // white background
+
+    // Header (matches the portal layout style).
+    draw_text_small_2x_centered(0, DISPLAY_W, 6, "LOW");
+    draw_text_small_2x_centered(0, DISPLAY_W, 28, "BATTERY");
+
+    // Voltage line, e.g. "3.65 V"
+    char vbuf[16];
+    snprintf(vbuf, sizeof(vbuf), "%.2f V", (double)volts);
+    draw_text_small_2x_centered(0, DISPLAY_W, 90, vbuf);
+
+    // Instruction line at the bottom.
+    draw_text_small_centered(0, DISPLAY_W, DISPLAY_H_PX - 24, "CHARGE TO RESUME");
+
+    panel_refresh_full();
+}
+
 void display_deinit(void) {
     if (!s_spi) return;
     panel_sleep();

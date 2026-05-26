@@ -1,8 +1,12 @@
 #include "battery_monitor.h"
+#ifndef TEST_HOST
 #include "adc_manager.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_log.h"
+#endif
+
+#ifndef TEST_HOST
 
 static const char *TAG = "BATTERY";
 
@@ -113,10 +117,12 @@ esp_err_t battery_monitor_deinit(void) {
     }
 
     ESP_LOGI(TAG, "Deinitializing battery monitor");
-    
+
     cali_handle = NULL;
     initialized = false;
     ESP_LOGI(TAG, "Battery monitor deinitialized");
-    
+
     return ESP_OK;
 }
+
+#endif // TEST_HOST

@@ -66,7 +66,7 @@ static char device_id_buffer[33] = {0};
 // MQTT_BROKER_URI, MQTT_USERNAME, MQTT_PASSWORD, MQTT_TOPIC_PREFIX, MQTT_KEEPALIVE_SEC
 
 #define MQTT_KEEPALIVE_SEC   10                          ///< MQTT keepalive interval in seconds
-#define DEFAULT_DEVICE_ID    "moisture01"                    ///< Fallback device ID if not provisioned
+#define DEFAULT_DEVICE_ID    "moisture01"                ///< Fallback device ID if not provisioned
 #define WIFI_TIMEOUT_SEC     30                          ///< WiFi connection timeout before retry
 #define MQTT_WAIT_MS         3000                        ///< Time to wait for MQTT connection (milliseconds)
 #define PUBLISH_WAIT_MS      2000                        ///< Time to wait after publishing before sleep (milliseconds)

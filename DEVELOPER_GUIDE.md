@@ -349,6 +349,20 @@ I MQTT_PUB: MQTT connected
 I MAIN: === Application Ready ===
 ```
 
+### Battery Sampling — Bench Verification
+
+After flashing changes to battery_monitor / main, verify on the bench supply:
+
+- [ ] Serial log shows an `OCV: x.xxxV (y% SoC)` line **before** the first WiFi log line on a timer wake.
+- [ ] With bench supply at 3.50 V at the battery input, the device:
+  - Logs `*** LOW BATTERY 3.50V < 3.70V - skipping WiFi/MQTT ***`
+  - Refreshes the e-paper to show `LOW BATTERY 3.50 V`
+  - Returns to deep sleep without any WiFi traffic
+- [ ] On the next wake at 3.50 V, the device skips the redraw (RTC latch held); only the log line appears.
+- [ ] Raise the bench supply to 3.80 V before the next wake: the device resumes a normal publish, the latch clears, and a subsequent forced drop below 3.70 V re-draws the warning.
+- [ ] On a healthy publish, the MQTT-published `battery_v` is meaningfully higher than the previous (under-load) reading at the same actual cell voltage. (Compare against a known telemetry sample from before this change at similar SoC.)
+- [ ] Pressing the GPIO7 button at low voltage still opens the config portal (battery gate is bypassed for portal wakes).
+
 ## Performance Considerations
 
 ### Power Consumption

@@ -18,7 +18,7 @@ Three related gaps:
 
 - Capture true OCV by sampling at the start of `app_main()`, before any radio or high-load peripheral is energized.
 - Translate cell voltage to SoC% via an 11-point piecewise-linear LiPo discharge curve.
-- Skip the publish cycle entirely when OCV < 3.60 V and surface a visible warning on the e-paper.
+- Skip the publish cycle entirely when OCV < 3.70 V and surface a visible warning on the e-paper.
 - Single source of truth for the SoC curve.
 
 ## Non-Goals
@@ -42,14 +42,14 @@ Two new public functions (existing `_init` / `_read_voltage` / `_deinit` unchang
  * Pure function — host-testable, no ESP-IDF dependencies. */
 float battery_monitor_v_to_pct(float volts);
 
-/* Returns true iff volts >= BATTERY_LOW_CUTOFF_V (3.60V).
- * Boundary is inclusive: exactly 3.60V is considered safe. */
+/* Returns true iff volts >= BATTERY_LOW_CUTOFF_V (3.70V).
+ * Boundary is inclusive: exactly 3.70V is considered safe. */
 bool battery_monitor_is_safe(float volts);
 ```
 
 Header constant exposed for other modules / tests:
 ```c
-#define BATTERY_LOW_CUTOFF_V  3.60f
+#define BATTERY_LOW_CUTOFF_V  3.70f
 ```
 
 **SoC lookup table** (11 points, descending):
@@ -96,7 +96,7 @@ Implementation follows the layout style of `display_show_portal()`. Approximate 
 |                      |
 |    LOW BATTERY       |
 |                      |
-|      3.55 V          |
+|      3.65 V          |
 |                      |
 |  Charge to resume    |
 |                      |
@@ -179,9 +179,9 @@ No on-device test harness exists. Host-side tests (TEST_HOST build, mirroring th
 - NaN / negative input → 0.0 (defensive).
 
 **`battery_monitor_is_safe`:**
-- `is_safe(3.59f)` → false
-- `is_safe(3.60f)` → true (inclusive boundary)
-- `is_safe(3.61f)` → true
+- `is_safe(3.69f)` → false
+- `is_safe(3.70f)` → true (inclusive boundary)
+- `is_safe(3.71f)` → true
 
 **On-device manual verification** (DEVELOPER_GUIDE.md checklist addition):
 - Serial log shows `OCV: x.xxxV` line *before* the first WiFi log line.

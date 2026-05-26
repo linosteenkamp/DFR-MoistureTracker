@@ -8,14 +8,18 @@
 // We include the source directly under TEST_HOST to avoid linking ESP-IDF.
 #define TEST_HOST 1
 #include "../../src/display.c"
+#include "../../src/battery_monitor.c"
 
 void setUp(void) {}
 void tearDown(void) {}
 
 // ---- display_battery_v_to_pct ----
 
-static void test_battery_at_floor_is_zero(void) {
-    TEST_ASSERT_EQUAL_INT(0, display_battery_v_to_pct(3.3f));
+static void test_battery_near_floor_is_low(void) {
+    // 3.30V is on the long flat tail between 3.65V/10% and 3.20V/0%.
+    // Linear interp: (3.30-3.20)/(3.65-3.20) * 10% = ~2.22% -> rounds to 2.
+    int p = display_battery_v_to_pct(3.30f);
+    TEST_ASSERT_TRUE_MESSAGE(p >= 0 && p <= 3, "3.30V should be very low");
 }
 
 static void test_battery_at_ceiling_is_hundred(void) {
@@ -23,9 +27,8 @@ static void test_battery_at_ceiling_is_hundred(void) {
 }
 
 static void test_battery_midpoint(void) {
-    // 3.75 V is the midpoint between 3.3 and 4.2 -> 50%
-    int p = display_battery_v_to_pct(3.75f);
-    TEST_ASSERT_TRUE(p >= 49 && p <= 51);
+    // 3.80V is an exact LUT point at 50%.
+    TEST_ASSERT_EQUAL_INT(50, display_battery_v_to_pct(3.80f));
 }
 
 static void test_battery_below_floor_clamps_to_zero(void) {
@@ -76,7 +79,7 @@ static void test_wifi_icon_size(void) {
 
 int main(void) {
     UNITY_BEGIN();
-    RUN_TEST(test_battery_at_floor_is_zero);
+    RUN_TEST(test_battery_near_floor_is_low);
     RUN_TEST(test_battery_at_ceiling_is_hundred);
     RUN_TEST(test_battery_midpoint);
     RUN_TEST(test_battery_below_floor_clamps_to_zero);

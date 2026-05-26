@@ -1,8 +1,63 @@
 #include "battery_monitor.h"
+#include "battery_soc.h"
+#include <math.h>
+#include <stddef.h>
+
+// ============================================================================
+// Pure helpers (host-testable)
+// ============================================================================
+
+typedef struct { float v; float pct; } soc_point_t;
+
+// 11-point LiPo discharge curve, descending by voltage.
+static const soc_point_t SOC_LUT[] = {
+    {4.20f, 100.0f},
+    {4.05f,  90.0f},
+    {3.96f,  80.0f},
+    {3.90f,  70.0f},
+    {3.85f,  60.0f},
+    {3.80f,  50.0f},
+    {3.76f,  40.0f},
+    {3.73f,  30.0f},
+    {3.70f,  20.0f},
+    {3.65f,  10.0f},
+    {3.20f,   0.0f},
+};
+static const size_t SOC_LUT_N = sizeof(SOC_LUT) / sizeof(SOC_LUT[0]);
+
+float battery_monitor_v_to_pct(float volts) {
+    // Defensive: NaN or negative -> 0%
+    if (isnan(volts) || volts <= 0.0f) return 0.0f;
+    // Clamp above max
+    if (volts >= SOC_LUT[0].v) return SOC_LUT[0].pct;
+    // Clamp below min
+    if (volts <= SOC_LUT[SOC_LUT_N - 1].v) return SOC_LUT[SOC_LUT_N - 1].pct;
+    // Find the bracketing pair (table is descending in voltage)
+    for (size_t i = 0; i < SOC_LUT_N - 1; i++) {
+        float v_hi = SOC_LUT[i].v;
+        float v_lo = SOC_LUT[i + 1].v;
+        if (volts <= v_hi && volts >= v_lo) {
+            float pct_hi = SOC_LUT[i].pct;
+            float pct_lo = SOC_LUT[i + 1].pct;
+            float frac = (volts - v_lo) / (v_hi - v_lo);
+            return pct_lo + frac * (pct_hi - pct_lo);
+        }
+    }
+    return 0.0f;  // unreachable given the clamps above
+}
+
+bool battery_monitor_is_safe(float volts) {
+    return volts >= BATTERY_LOW_CUTOFF_V;
+}
+
+#ifndef TEST_HOST
 #include "adc_manager.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_log.h"
+#endif
+
+#ifndef TEST_HOST
 
 static const char *TAG = "BATTERY";
 
@@ -113,10 +168,12 @@ esp_err_t battery_monitor_deinit(void) {
     }
 
     ESP_LOGI(TAG, "Deinitializing battery monitor");
-    
+
     cali_handle = NULL;
     initialized = false;
     ESP_LOGI(TAG, "Battery monitor deinitialized");
-    
+
     return ESP_OK;
 }
+
+#endif // TEST_HOST

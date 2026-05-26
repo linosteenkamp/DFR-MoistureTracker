@@ -11,6 +11,8 @@
  * (ceil(122 / 8)) by 250 tall = 4000 bytes.
  */
 
+#include "battery_soc.h"
+
 #ifndef TEST_HOST
 #include "display.h"
 #include "display_assets.h"
@@ -27,9 +29,7 @@
 // ============================================================================
 
 int display_battery_v_to_pct(float v) {
-    if (v <= 3.3f) return 0;
-    if (v >= 4.2f) return 100;
-    float pct = (v - 3.3f) * (100.0f / 0.9f);
+    float pct = battery_monitor_v_to_pct(v);
     int i = (int)(pct + 0.5f);
     if (i < 0) return 0;
     if (i > 100) return 100;
@@ -561,6 +561,24 @@ void display_show_portal(void) {
 
     // Hint at the bottom
     draw_text_small_centered(0, DISPLAY_W, qr_y + DISPLAY_QR_H + 8, "SCAN TO CONFIGURE");
+
+    panel_refresh_full();
+}
+
+void display_show_low_battery(float volts) {
+    fb_clear(0xFF);  // white background
+
+    // Header (matches the portal layout style).
+    draw_text_small_2x_centered(0, DISPLAY_W, 6, "LOW");
+    draw_text_small_2x_centered(0, DISPLAY_W, 28, "BATTERY");
+
+    // Voltage line, e.g. "3.65 V"
+    char vbuf[16];
+    snprintf(vbuf, sizeof(vbuf), "%.2f V", (double)volts);
+    draw_text_small_2x_centered(0, DISPLAY_W, 90, vbuf);
+
+    // Instruction line at the bottom.
+    draw_text_small_centered(0, DISPLAY_W, DISPLAY_H_PX - 24, "CHARGE TO RESUME");
 
     panel_refresh_full();
 }

@@ -46,6 +46,7 @@
 #include "config_portal.h"
 #include "adc_manager.h"
 #include "battery_monitor.h"
+#include "battery_soc.h"
 #include "soil_moisture.h"
 #include "soil_calibration.h"
 #include "display.h"
@@ -58,6 +59,13 @@ static const char *TAG = "MAIN";
 static char mqtt_topic_buffer[128] = {0};
 static char device_id_buffer[33] = {0};
 
+// Cached OCV captured at the very top of app_main(), reused by publish_telemetry_once().
+static float g_cached_battery_v = 0.0f;
+
+// Persists across deep sleep: latches when the low-battery warning has been drawn,
+// so we don't burn ~30 mJ refreshing the e-paper every hour while the cell is starved.
+RTC_DATA_ATTR static bool s_low_battery_shown = false;
+
 // ============================================================================
 // Application Configuration
 // ============================================================================
@@ -66,7 +74,7 @@ static char device_id_buffer[33] = {0};
 // MQTT_BROKER_URI, MQTT_USERNAME, MQTT_PASSWORD, MQTT_TOPIC_PREFIX, MQTT_KEEPALIVE_SEC
 
 #define MQTT_KEEPALIVE_SEC   10                          ///< MQTT keepalive interval in seconds
-#define DEFAULT_DEVICE_ID    "moisture01"                    ///< Fallback device ID if not provisioned
+#define DEFAULT_DEVICE_ID    "moisture01"                ///< Fallback device ID if not provisioned
 #define WIFI_TIMEOUT_SEC     30                          ///< WiFi connection timeout before retry
 #define MQTT_WAIT_MS         3000                        ///< Time to wait for MQTT connection (milliseconds)
 #define PUBLISH_WAIT_MS      2000                        ///< Time to wait after publishing before sleep (milliseconds)
@@ -389,8 +397,9 @@ static esp_err_t publish_telemetry_once(void) {
     
     ESP_LOGI(TAG, "MQTT connected, reading sensors...");
     
-    // Read battery voltage
-    float voltage = battery_monitor_read_voltage();
+    // Battery voltage was captured at the top of app_main() before WiFi powered up,
+    // so it reflects open-circuit voltage rather than the sagging-under-load value.
+    float voltage = g_cached_battery_v;
     
     // Read soil moisture
     float soil_moisture = soil_moisture_read_percentage();
@@ -516,6 +525,29 @@ void app_main(void) {
         run_portal_then_sleep();
         return;
     }
+
+    // ------------------------------------------------------------------
+    // Zero-load battery sample: must happen before WiFi/MQTT energize.
+    // init_system() only touches NVS, event loop, and ADC — no radio yet.
+    // ------------------------------------------------------------------
+    float ocv = battery_monitor_read_voltage();
+    ESP_LOGI(TAG, "OCV: %.3fV (%.0f%% SoC)", ocv, battery_monitor_v_to_pct(ocv));
+
+    if (!battery_monitor_is_safe(ocv)) {
+        ESP_LOGE(TAG, "*** LOW BATTERY %.2fV < %.2fV - skipping WiFi/MQTT ***",
+                 ocv, BATTERY_LOW_CUTOFF_V);
+        if (!s_low_battery_shown) {
+            s_low_battery_shown = true;     // latch first, refresh second
+            if (display_init() == ESP_OK) {
+                display_show_low_battery(ocv);
+                display_deinit();
+            }
+        }
+        enter_deep_sleep(DEEP_SLEEP_INTERVAL_SEC);
+        return;
+    }
+    s_low_battery_shown = false;            // healthy reading clears the latch
+    g_cached_battery_v = ocv;               // reused by publish_telemetry_once()
 
     // Step 2: Setup WiFi (handles provisioning if needed)
     if (setup_wifi() != ESP_OK) {

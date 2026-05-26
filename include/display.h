@@ -33,6 +33,11 @@ void display_show_telemetry(const display_telemetry_t *t);
 /** Render the portal view (SSID + URL + QR) in a fresh full refresh. */
 void display_show_portal(void);
 
+/* Render a minimal full-screen "LOW BATTERY <volts>V" warning.
+ * Intended for one-shot display when battery_monitor_is_safe() is false.
+ * Uses large text only — fast refresh, minimal energy. */
+void display_show_low_battery(float volts);
+
 /** Put the panel back into deep sleep and release the SPI bus. */
 void display_deinit(void);
 #endif

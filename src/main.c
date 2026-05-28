@@ -565,15 +565,24 @@ void app_main(void) {
     } else {
         ESP_LOGW(TAG, "Zigbee not ready (not joined yet)");
     }
-    // Reporting wired in Task 4; sleep model finalized in Task 6.
+
+    /* Task 4: read sensors and report once on every wake (or bench tick). */
+    {
+        float soil    = soil_moisture_read_percentage();
+        float batt_pct = battery_monitor_v_to_pct(g_cached_battery_v);
+        zigbee_reporter_report(soil, g_cached_battery_v, batt_pct);
+    }
+
 #ifdef DISABLE_DEEP_SLEEP
-    // Bench testing: stay awake so the USB-Serial-JTAG stays up (deep sleep
-    // powers it down) and the Zigbee task keeps steering/retrying in the
-    // background. Lets us observe the join and re-flash without waking the chip.
-    ESP_LOGW(TAG, "DISABLE_DEEP_SLEEP set - staying awake for bench testing");
+    /* Bench testing: stay awake so the USB-Serial-JTAG stays up (deep sleep
+     * powers it down) and the Zigbee task keeps steering/retrying in the
+     * background.  Re-read and re-report every 5 s so z2m shows live updates. */
+    ESP_LOGW(TAG, "DISABLE_DEEP_SLEEP set - staying awake, reporting every 5 s");
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(5000));
-        ESP_LOGI(TAG, "[bench] awake, joined=%d", zigbee_reporter_wait_ready(0) ? 1 : 0);
+        float s  = soil_moisture_read_percentage();
+        float bp = battery_monitor_v_to_pct(g_cached_battery_v);
+        zigbee_reporter_report(s, g_cached_battery_v, bp);
     }
 #else
     enter_deep_sleep(DEEP_SLEEP_INTERVAL_SEC);

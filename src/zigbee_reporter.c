@@ -1,8 +1,7 @@
 /**
  * @file zigbee_reporter.c
- * @brief Zigbee end-device stack init + BDB join using the classic esp_zb_* API.
- *        CONFIG_ZB_SDK_1xx=y enables the compat shim in esp-zigbee-lib 2.x.
- *        Sensor reporting is wired in a later task (Task 4).
+ * @brief Zigbee end-device stack init + BDB join + sensor cluster reporting.
+ *        esp-zigbee-lib 1.6.x native esp_zb_* API.
  *
  * The entire body is wrapped in #ifdef USE_ZIGBEE so that the WiFi build
  * (no -DUSE_ZIGBEE) compiles this file as empty — no undefined references.
@@ -11,27 +10,44 @@
 #ifdef USE_ZIGBEE
 
 #include "zigbee_reporter.h"
+#include "zigbee_encode.h"
 
 /* Classic esp_zb_* API, native to esp-zigbee-lib 1.6.x (headers at the
  * include root; no compat/ prefix). Matched pair with esp-zboss-lib 1.6.x. */
-#include "esp_zigbee_core.h"         /* esp_zb_cfg_t, esp_zb_init, ESP_ZB_TRANSCEIVER_ALL_CHANNELS_MASK, ... */
-#include "platform/esp_zigbee_platform.h"  /* esp_zb_platform_config_t, esp_zb_platform_config() */
+#include "esp_zigbee_core.h"         /* esp_zb_cfg_t, esp_zb_init,
+                                        esp_zb_lock_acquire/release,
+                                        ESP_ZB_TRANSCEIVER_ALL_CHANNELS_MASK */
+#include "platform/esp_zigbee_platform.h"  /* esp_zb_platform_config_t */
 #include "nwk/esp_zigbee_nwk.h"     /* ESP_ZB_DEVICE_TYPE_ED, ESP_ZB_ED_AGING_TIMEOUT_64MIN */
-#include "bdb/esp_zigbee_bdb_commissioning.h" /* esp_zb_bdb_start_top_level_commissioning, esp_zb_bdb_is_factory_new */
-#include "zdo/esp_zigbee_zdo_common.h"        /* esp_zb_app_signal_t, signal type enum, esp_zb_zdo_signal_to_string */
-#include "esp_zigbee_cluster.h"      /* esp_zb_basic_cluster_create, esp_zb_identify_cluster_create,
-                                               esp_zb_zcl_cluster_list_create, esp_zb_cluster_list_add_*,
-                                               esp_zb_basic_cluster_cfg_t, esp_zb_identify_cluster_cfg_t */
-#include "esp_zigbee_attribute.h"    /* esp_zb_basic_cluster_add_attr, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE */
+#include "bdb/esp_zigbee_bdb_commissioning.h" /* esp_zb_bdb_start_top_level_commissioning */
+#include "zdo/esp_zigbee_zdo_common.h"        /* esp_zb_app_signal_t, signal type enum */
+#include "esp_zigbee_cluster.h"      /* esp_zb_*_cluster_create,
+                                        esp_zb_zcl_cluster_list_create,
+                                        esp_zb_cluster_list_add_*,
+                                        esp_zb_cluster_list_add_custom_cluster */
+#include "esp_zigbee_attribute.h"    /* esp_zb_basic_cluster_add_attr,
+                                        esp_zb_power_config_cluster_add_attr,
+                                        esp_zb_zcl_attr_list_create,
+                                        esp_zb_custom_cluster_add_custom_attr,
+                                        esp_zb_zcl_set_attribute_val */
 #include "esp_zigbee_endpoint.h"     /* esp_zb_ep_list_create, esp_zb_ep_list_add_ep */
-#include "zcl/esp_zigbee_zcl_common.h"   /* ESP_ZB_AF_HA_PROFILE_ID, ESP_ZB_HA_SIMPLE_SENSOR_DEVICE_ID,
-                                                    esp_zb_endpoint_config_t */
+#include "zcl/esp_zigbee_zcl_common.h"   /* ESP_ZB_AF_HA_PROFILE_ID,
+                                            ESP_ZB_HA_SIMPLE_SENSOR_DEVICE_ID,
+                                            ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                                            ESP_ZB_ZCL_ATTR_TYPE_U8,
+                                            ESP_ZB_ZCL_ATTR_TYPE_U16,
+                                            ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY,
+                                            ESP_ZB_ZCL_ATTR_ACCESS_REPORTING */
 #include "zcl/esp_zigbee_zcl_basic.h"    /* ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID/MODEL_IDENTIFIER_ID */
+#include "zcl/esp_zigbee_zcl_power_config.h" /* ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID (0x0020),
+                                                 ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID (0x0021) */
 #include "zcl/esp_zigbee_zcl_core.h"     /* esp_zb_device_register */
+#include "zcl/esp_zigbee_zcl_command.h"  /* esp_zb_zcl_report_attr_cmd_t, esp_zb_zcl_report_attr_cmd_req */
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "aps/esp_zigbee_aps.h"  /* ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT */
 #include <string.h>
 
 static const char *TAG = "ZB_RPT";
@@ -49,9 +65,29 @@ static void steering_alarm_cb(uint8_t mode)
 
 #define APP_ENDPOINT  1U
 
+/* Soil Moisture cluster ID: ZCL 0x0408 — no native helper in this SDK version. */
+#define CLUSTER_ID_SOIL_MOISTURE  0x0408U
+
 /* ZCL strings are length-prefixed: first byte = character count, then ASCII data. */
 #define MANUF_NAME  "\x0B" "DFRobot-DIY"    /* 11 chars */
 #define MODEL_ID    "\x0E" "DFR-SoilSensor" /* 14 chars */
+
+/* ============================================================
+ * File-scope attribute value storage.
+ *
+ * The ZCL attribute tables store POINTERS into these variables.
+ * They must remain valid for the lifetime of the stack (i.e.
+ * forever), so they are module-level statics — NOT stack locals.
+ * ============================================================ */
+
+/* Power Configuration cluster (0x0001) */
+static uint8_t  s_batt_voltage = 0;    /* 0x0020: BatteryVoltage, uint8, units of 100mV */
+static uint8_t  s_batt_pct     = 0;    /* 0x0021: BatteryPercentageRemaining, uint8, units of 0.5% */
+
+/* Soil Moisture cluster (0x0408) */
+static uint16_t s_soil_measured = 0;      /* 0x0000: MeasuredValue, uint16, units of 0.01% */
+static uint16_t s_soil_min      = 0;      /* 0x0001: MinMeasuredValue, uint16 */
+static uint16_t s_soil_max      = 10000;  /* 0x0002: MaxMeasuredValue, uint16 */
 
 /* ============================================================
  * Required application signal callback (called by the stack).
@@ -91,8 +127,6 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
 
     case ESP_ZB_BDB_SIGNAL_STEERING:
         if (err_status == ESP_OK) {
-            esp_zb_ieee_addr_t ext_pan;
-            esp_zb_get_extended_pan_id(ext_pan);
             ESP_LOGI(TAG, "BDB steering complete — joined network, short addr 0x%04hx",
                      esp_zb_get_short_address());
             s_joined = true;
@@ -132,15 +166,15 @@ static void esp_zb_task(void *pv)
     };
     esp_zb_init(&zb_cfg);
 
-    /* ---- Minimal endpoint: Basic + Identify (enough to commission) ---- */
+    /* ---- Basic cluster ---- */
     esp_zb_basic_cluster_cfg_t basic_cfg = {
         .zcl_version  = 8,
         .power_source = 3,  /* 0x03 = battery */
     };
     esp_zb_attribute_list_t *basic_attrs = esp_zb_basic_cluster_create(&basic_cfg);
 
-    /* Add optional string attributes: ManufacturerName and ModelIdentifier. */
-    /* The cast discards const — the API takes void*, but does not mutate the string. */
+    /* Add optional string attributes: ManufacturerName and ModelIdentifier.
+     * The cast discards const — the API takes void*, but does not mutate the string. */
     esp_zb_basic_cluster_add_attr(basic_attrs,
                                   ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID,
                                   (void *)MANUF_NAME);
@@ -148,15 +182,63 @@ static void esp_zb_task(void *pv)
                                   ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID,
                                   (void *)MODEL_ID);
 
+    /* ---- Identify cluster ---- */
     esp_zb_identify_cluster_cfg_t identify_cfg = { .identify_time = 0 };
     esp_zb_attribute_list_t *identify_attrs = esp_zb_identify_cluster_create(&identify_cfg);
 
+    /* ---- Power Configuration cluster (0x0001) ---- */
+    /* The default cfg creates MainsVoltage+MainsFrequency; we use the helper then
+     * add battery attrs explicitly.  A zeroed cfg gives sensible defaults (mains=0,
+     * freq=0) which is fine since we only care about the battery sub-attributes. */
+    esp_zb_power_config_cluster_cfg_t power_cfg;
+    memset(&power_cfg, 0, sizeof(power_cfg));
+    esp_zb_attribute_list_t *power_attrs = esp_zb_power_config_cluster_create(&power_cfg);
+
+    /* BatteryVoltage (0x0020) — uint8, read-only + reportable */
+    esp_zb_power_config_cluster_add_attr(power_attrs,
+                                         ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID,
+                                         &s_batt_voltage);
+    /* BatteryPercentageRemaining (0x0021) — uint8, read-only + reportable */
+    esp_zb_power_config_cluster_add_attr(power_attrs,
+                                         ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
+                                         &s_batt_pct);
+
+    /* ---- Soil Moisture cluster (0x0408) — custom, no native helper ---- */
+    esp_zb_attribute_list_t *soil_attrs = esp_zb_zcl_attr_list_create(CLUSTER_ID_SOIL_MOISTURE);
+
+    /* attr 0x0000: MeasuredValue, uint16, read-only + reportable */
+    esp_zb_custom_cluster_add_custom_attr(soil_attrs,
+        0x0000U,
+        ESP_ZB_ZCL_ATTR_TYPE_U16,
+        (uint8_t)(ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING),
+        &s_soil_measured);
+
+    /* attr 0x0001: MinMeasuredValue, uint16, read-only */
+    esp_zb_custom_cluster_add_custom_attr(soil_attrs,
+        0x0001U,
+        ESP_ZB_ZCL_ATTR_TYPE_U16,
+        ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY,
+        &s_soil_min);
+
+    /* attr 0x0002: MaxMeasuredValue, uint16, read-only */
+    esp_zb_custom_cluster_add_custom_attr(soil_attrs,
+        0x0002U,
+        ESP_ZB_ZCL_ATTR_TYPE_U16,
+        ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY,
+        &s_soil_max);
+
+    /* ---- Assemble cluster list ---- */
     esp_zb_cluster_list_t *clusters = esp_zb_zcl_cluster_list_create();
     esp_zb_cluster_list_add_basic_cluster(clusters, basic_attrs,
                                           ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
     esp_zb_cluster_list_add_identify_cluster(clusters, identify_attrs,
                                              ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+    esp_zb_cluster_list_add_power_config_cluster(clusters, power_attrs,
+                                                 ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+    esp_zb_cluster_list_add_custom_cluster(clusters, soil_attrs,
+                                           ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
+    /* ---- Register endpoint ---- */
     esp_zb_ep_list_t *ep_list = esp_zb_ep_list_create();
     esp_zb_endpoint_config_t ep_cfg = {
         .endpoint            = APP_ENDPOINT,
@@ -220,9 +302,103 @@ bool zigbee_reporter_wait_ready(uint32_t timeout_ms)
 
 esp_err_t zigbee_reporter_report(float soil_pct, float battery_v, float battery_pct)
 {
-    /* Stub — real ZCL attribute reporting wired in Task 4. */
-    ESP_LOGI(TAG, "report (stub): soil=%.1f%% batt=%.2fV (%.0f%%)",
-             soil_pct, battery_v, battery_pct);
+    /* Encode float values into ZCL wire formats. */
+    uint16_t soil = zigbee_encode_soil_pct(soil_pct);
+    uint8_t  volt = zigbee_encode_batt_voltage(battery_v);
+    uint8_t  pct  = zigbee_encode_batt_pct(battery_pct);
+
+    /* Update the static storage that the cluster's attribute table points to.
+     * Do this BEFORE set_attribute_val so both the pointer and the set value agree. */
+    s_soil_measured = soil;
+    s_batt_voltage  = volt;
+    s_batt_pct      = pct;
+
+    /* Take the Zigbee stack lock before touching ZCL data structures.
+     * esp_zb_lock_acquire returns true if the lock was acquired. */
+    if (!esp_zb_lock_acquire(portMAX_DELAY)) {
+        ESP_LOGE(TAG, "Failed to acquire Zigbee lock");
+        return ESP_FAIL;
+    }
+
+    /* Update ZCL attribute store and send explicit attribute-report frames. */
+
+    /* --- Soil Moisture cluster (0x0408) --- */
+    esp_zb_zcl_set_attribute_val(APP_ENDPOINT,
+                                 CLUSTER_ID_SOIL_MOISTURE,
+                                 ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                                 0x0000U,   /* MeasuredValue */
+                                 &s_soil_measured,
+                                 false);
+
+    /* --- Power Configuration cluster (0x0001) --- */
+    esp_zb_zcl_set_attribute_val(APP_ENDPOINT,
+                                 ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+                                 ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                                 ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID,
+                                 &s_batt_voltage,
+                                 false);
+
+    esp_zb_zcl_set_attribute_val(APP_ENDPOINT,
+                                 ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+                                 ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                                 ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
+                                 &s_batt_pct,
+                                 false);
+
+    /* Send explicit report-attribute commands so z2m sees the updates immediately.
+     * Destination: coordinator (0x0000), endpoint 1 (or broadcast 0xFF — use 0xFF
+     * for z2m which accepts reports on any dst-ep when bound). */
+
+    /* Soil MeasuredValue report */
+    {
+        esp_zb_zcl_report_attr_cmd_t cmd = {
+            .zcl_basic_cmd = {
+                .dst_addr_u.addr_short = 0x0000U,  /* coordinator */
+                .dst_endpoint          = 1U,
+                .src_endpoint          = APP_ENDPOINT,
+            },
+            .address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT,
+            .clusterID    = CLUSTER_ID_SOIL_MOISTURE,
+            .attributeID  = 0x0000U,
+        };
+        esp_zb_zcl_report_attr_cmd_req(&cmd);
+    }
+
+    /* BatteryVoltage report */
+    {
+        esp_zb_zcl_report_attr_cmd_t cmd = {
+            .zcl_basic_cmd = {
+                .dst_addr_u.addr_short = 0x0000U,
+                .dst_endpoint          = 1U,
+                .src_endpoint          = APP_ENDPOINT,
+            },
+            .address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT,
+            .clusterID    = ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+            .attributeID  = ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID,
+        };
+        esp_zb_zcl_report_attr_cmd_req(&cmd);
+    }
+
+    /* BatteryPercentageRemaining report */
+    {
+        esp_zb_zcl_report_attr_cmd_t cmd = {
+            .zcl_basic_cmd = {
+                .dst_addr_u.addr_short = 0x0000U,
+                .dst_endpoint          = 1U,
+                .src_endpoint          = APP_ENDPOINT,
+            },
+            .address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT,
+            .clusterID    = ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+            .attributeID  = ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
+        };
+        esp_zb_zcl_report_attr_cmd_req(&cmd);
+    }
+
+    esp_zb_lock_release();
+
+    ESP_LOGI(TAG, "reported soil=%u(%.1f%%) volt=%u pct=%u",
+             soil, soil_pct, volt, pct);
+
     return ESP_OK;
 }
 

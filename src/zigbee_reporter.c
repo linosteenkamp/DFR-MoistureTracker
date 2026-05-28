@@ -12,23 +12,22 @@
 
 #include "zigbee_reporter.h"
 
-/* Classic esp_zb_* compat API.  Requires CONFIG_ZB_SDK_1xx=y.
- * This header is at managed_components/espressif__esp-zigbee-lib/include/compat/
- * and pulls in the full compat shim (BDB, NWK, ZDO signal enums, platform). */
-#include "compat/esp_zigbee_core.h"         /* esp_zb_cfg_t, esp_zb_init, ESP_ZB_TRANSCEIVER_ALL_CHANNELS_MASK, ... */
-#include "compat/platform/esp_zigbee_platform.h"  /* esp_zb_platform_config_t, esp_zb_platform_config() */
-#include "compat/nwk/esp_zigbee_nwk.h"     /* ESP_ZB_DEVICE_TYPE_ED, ESP_ZB_ED_AGING_TIMEOUT_64MIN */
-#include "compat/bdb/esp_zigbee_bdb_commissioning.h" /* esp_zb_bdb_start_top_level_commissioning, esp_zb_bdb_is_factory_new */
-#include "compat/zdo/esp_zigbee_zdo_common.h"        /* esp_zb_app_signal_t, signal type enum, esp_zb_zdo_signal_to_string */
-#include "compat/esp_zigbee_cluster.h"      /* esp_zb_basic_cluster_create, esp_zb_identify_cluster_create,
+/* Classic esp_zb_* API, native to esp-zigbee-lib 1.6.x (headers at the
+ * include root; no compat/ prefix). Matched pair with esp-zboss-lib 1.6.x. */
+#include "esp_zigbee_core.h"         /* esp_zb_cfg_t, esp_zb_init, ESP_ZB_TRANSCEIVER_ALL_CHANNELS_MASK, ... */
+#include "platform/esp_zigbee_platform.h"  /* esp_zb_platform_config_t, esp_zb_platform_config() */
+#include "nwk/esp_zigbee_nwk.h"     /* ESP_ZB_DEVICE_TYPE_ED, ESP_ZB_ED_AGING_TIMEOUT_64MIN */
+#include "bdb/esp_zigbee_bdb_commissioning.h" /* esp_zb_bdb_start_top_level_commissioning, esp_zb_bdb_is_factory_new */
+#include "zdo/esp_zigbee_zdo_common.h"        /* esp_zb_app_signal_t, signal type enum, esp_zb_zdo_signal_to_string */
+#include "esp_zigbee_cluster.h"      /* esp_zb_basic_cluster_create, esp_zb_identify_cluster_create,
                                                esp_zb_zcl_cluster_list_create, esp_zb_cluster_list_add_*,
                                                esp_zb_basic_cluster_cfg_t, esp_zb_identify_cluster_cfg_t */
-#include "compat/esp_zigbee_attribute.h"    /* esp_zb_basic_cluster_add_attr, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE */
-#include "compat/esp_zigbee_endpoint.h"     /* esp_zb_ep_list_create, esp_zb_ep_list_add_ep */
-#include "compat/zcl/esp_zigbee_zcl_common.h"   /* ESP_ZB_AF_HA_PROFILE_ID, ESP_ZB_HA_SIMPLE_SENSOR_DEVICE_ID,
+#include "esp_zigbee_attribute.h"    /* esp_zb_basic_cluster_add_attr, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE */
+#include "esp_zigbee_endpoint.h"     /* esp_zb_ep_list_create, esp_zb_ep_list_add_ep */
+#include "zcl/esp_zigbee_zcl_common.h"   /* ESP_ZB_AF_HA_PROFILE_ID, ESP_ZB_HA_SIMPLE_SENSOR_DEVICE_ID,
                                                     esp_zb_endpoint_config_t */
-#include "compat/zcl/esp_zigbee_zcl_basic.h"    /* ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID/MODEL_IDENTIFIER_ID */
-#include "compat/zcl/esp_zigbee_zcl_core.h"     /* esp_zb_device_register */
+#include "zcl/esp_zigbee_zcl_basic.h"    /* ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID/MODEL_IDENTIFIER_ID */
+#include "zcl/esp_zigbee_zcl_core.h"     /* esp_zb_device_register */
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -164,7 +163,6 @@ static void esp_zb_task(void *pv)
         .app_profile_id      = ESP_ZB_AF_HA_PROFILE_ID,
         .app_device_id       = ESP_ZB_HA_SIMPLE_SENSOR_DEVICE_ID,
         .app_device_version  = 0,
-        .reserved            = 0,
     };
     esp_zb_ep_list_add_ep(ep_list, clusters, ep_cfg);
     esp_zb_device_register(ep_list);

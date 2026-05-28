@@ -7,9 +7,6 @@ CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 CONFIG_ZB_ENABLED=y
 CONFIG_ZB_ZED=y
 CONFIG_ZB_RADIO_NATIVE=y
-# Use the classic esp_zb_* API (matches all public examples + our plan).
-# Without this, esp-zigbee-lib 2.x defaults to the native ezbee/ezb_* API.
-CONFIG_ZB_SDK_1xx=y
 
 # Flash size (board is 4MB; explicit because this env's sdkconfig_defaults
 # replaces the base defaults and would otherwise fall back to 2MB)

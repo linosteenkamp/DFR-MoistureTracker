@@ -559,15 +559,26 @@ void app_main(void) {
         enter_deep_sleep(DEEP_SLEEP_INTERVAL_SEC);
         return;
     }
-    if (!zigbee_reporter_wait_ready(30000)) {
-        ESP_LOGW(TAG, "Zigbee not ready (not joined?), sleeping");
-        enter_deep_sleep(DEEP_SLEEP_INTERVAL_SEC);
-        return;
+    bool zb_joined = zigbee_reporter_wait_ready(30000);
+    if (zb_joined) {
+        ESP_LOGI(TAG, "Zigbee ready (joined)");
+    } else {
+        ESP_LOGW(TAG, "Zigbee not ready (not joined yet)");
     }
-    ESP_LOGI(TAG, "Zigbee ready (joined)");
     // Reporting wired in Task 4; sleep model finalized in Task 6.
+#ifdef DISABLE_DEEP_SLEEP
+    // Bench testing: stay awake so the USB-Serial-JTAG stays up (deep sleep
+    // powers it down) and the Zigbee task keeps steering/retrying in the
+    // background. Lets us observe the join and re-flash without waking the chip.
+    ESP_LOGW(TAG, "DISABLE_DEEP_SLEEP set - staying awake for bench testing");
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        ESP_LOGI(TAG, "[bench] awake, joined=%d", zigbee_reporter_wait_ready(0) ? 1 : 0);
+    }
+#else
     enter_deep_sleep(DEEP_SLEEP_INTERVAL_SEC);
     return;
+#endif
 #else
     // Step 2: Setup WiFi (handles provisioning if needed)
     if (setup_wifi() != ESP_OK) {

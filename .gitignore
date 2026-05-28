@@ -8,5 +8,8 @@
 # Credentials - DO NOT COMMIT
 include/mqtt_credentials.h
 
+# ESP-IDF managed components (downloaded sources; pinned via dependencies.lock)
+managed_components/
+
 # Optional: Ignore PlatformIO environment-specific config
 # platformio_override.ini

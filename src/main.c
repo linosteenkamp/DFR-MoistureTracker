@@ -52,6 +52,9 @@
 #include "display.h"
 #include "mqtt_publisher.h"
 #include "mqtt_credentials.h"  // MQTT broker credentials (not in git)
+#ifdef USE_ZIGBEE
+#include "zigbee_reporter.h"
+#endif
 
 static const char *TAG = "MAIN";
 
@@ -549,28 +552,45 @@ void app_main(void) {
     s_low_battery_shown = false;            // healthy reading clears the latch
     g_cached_battery_v = ocv;               // reused by publish_telemetry_once()
 
+#ifdef USE_ZIGBEE
+    // --- Zigbee transport path (Tasks 3+) ---
+    if (zigbee_reporter_init() != ESP_OK) {
+        ESP_LOGE(TAG, "Zigbee init failed, sleeping");
+        enter_deep_sleep(DEEP_SLEEP_INTERVAL_SEC);
+        return;
+    }
+    if (!zigbee_reporter_wait_ready(30000)) {
+        ESP_LOGW(TAG, "Zigbee not ready (not joined?), sleeping");
+        enter_deep_sleep(DEEP_SLEEP_INTERVAL_SEC);
+        return;
+    }
+    ESP_LOGI(TAG, "Zigbee ready (joined)");
+    // Reporting wired in Task 4; sleep model finalized in Task 6.
+    enter_deep_sleep(DEEP_SLEEP_INTERVAL_SEC);
+    return;
+#else
     // Step 2: Setup WiFi (handles provisioning if needed)
     if (setup_wifi() != ESP_OK) {
         ESP_LOGE(TAG, "WiFi setup failed, entering sleep");
         enter_deep_sleep(DEEP_SLEEP_INTERVAL_SEC);
         return;  // Never reached
     }
-    
+
     // Step 3: Setup MQTT
     if (setup_mqtt() != ESP_OK) {
         ESP_LOGE(TAG, "MQTT setup failed, entering sleep");
         enter_deep_sleep(DEEP_SLEEP_INTERVAL_SEC);
         return;  // Never reached
     }
-    
+
     ESP_LOGI(TAG, "=== Initialization Complete ===");
-    
+
     // Step 4: Publish telemetry once
     esp_err_t err = publish_telemetry_once();
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Telemetry publish failed, but continuing to sleep");
     }
-    
+
 #ifdef DISABLE_DEEP_SLEEP
     ESP_LOGW(TAG, "DISABLE_DEEP_SLEEP set - looping publish every %d ms", TEST_PUBLISH_INTERVAL_MS);
     while (1) {
@@ -583,4 +603,5 @@ void app_main(void) {
 
     // This line is never reached - device enters deep sleep
 #endif
+#endif /* USE_ZIGBEE */
 }

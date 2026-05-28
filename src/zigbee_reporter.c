@@ -41,6 +41,7 @@
 #include "zcl/esp_zigbee_zcl_basic.h"    /* ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID/MODEL_IDENTIFIER_ID */
 #include "zcl/esp_zigbee_zcl_power_config.h" /* ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID (0x0020),
                                                  ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID (0x0021) */
+#include "zcl/esp_zigbee_zcl_humidity_meas.h" /* ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID (soil via 0x0405) */
 #include "zcl/esp_zigbee_zcl_core.h"     /* esp_zb_device_register */
 #include "zcl/esp_zigbee_zcl_command.h"  /* esp_zb_zcl_report_attr_cmd_t, esp_zb_zcl_report_attr_cmd_req */
 
@@ -65,9 +66,6 @@ static void steering_alarm_cb(uint8_t mode)
 
 #define APP_ENDPOINT  1U
 
-/* Soil Moisture cluster ID: ZCL 0x0408 — no native helper in this SDK version. */
-#define CLUSTER_ID_SOIL_MOISTURE  0x0408U
-
 /* ZCL strings are length-prefixed: first byte = character count, then ASCII data. */
 #define MANUF_NAME  "\x0B" "DFRobot-DIY"    /* 11 chars */
 #define MODEL_ID    "\x0E" "DFR-SoilSensor" /* 14 chars */
@@ -84,10 +82,9 @@ static void steering_alarm_cb(uint8_t mode)
 static uint8_t  s_batt_voltage = 0;    /* 0x0020: BatteryVoltage, uint8, units of 100mV */
 static uint8_t  s_batt_pct     = 0;    /* 0x0021: BatteryPercentageRemaining, uint8, units of 0.5% */
 
-/* Soil Moisture cluster (0x0408) */
-static uint16_t s_soil_measured = 0;      /* 0x0000: MeasuredValue, uint16, units of 0.01% */
-static uint16_t s_soil_min      = 0;      /* 0x0001: MinMeasuredValue, uint16 */
-static uint16_t s_soil_max      = 10000;  /* 0x0002: MaxMeasuredValue, uint16 */
+/* Soil moisture, carried on the Relative Humidity Measurement cluster (0x0405).
+ * MeasuredValue, uint16, units of 0.01% — same format as soil moisture %. */
+static uint16_t s_soil_measured = 0;
 
 /* ============================================================
  * Required application signal callback (called by the stack).
@@ -211,29 +208,17 @@ static void esp_zb_task(void *pv)
                                          ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
                                          &s_batt_pct);
 
-    /* ---- Soil Moisture cluster (0x0408) — custom, no native helper ---- */
-    esp_zb_attribute_list_t *soil_attrs = esp_zb_zcl_attr_list_create(CLUSTER_ID_SOIL_MOISTURE);
-
-    /* attr 0x0000: MeasuredValue, uint16, read-only + reportable */
-    esp_zb_custom_cluster_add_custom_attr(soil_attrs,
-        0x0000U,
-        ESP_ZB_ZCL_ATTR_TYPE_U16,
-        (uint8_t)(ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING),
-        &s_soil_measured);
-
-    /* attr 0x0001: MinMeasuredValue, uint16, read-only */
-    esp_zb_custom_cluster_add_custom_attr(soil_attrs,
-        0x0001U,
-        ESP_ZB_ZCL_ATTR_TYPE_U16,
-        ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY,
-        &s_soil_min);
-
-    /* attr 0x0002: MaxMeasuredValue, uint16, read-only */
-    esp_zb_custom_cluster_add_custom_attr(soil_attrs,
-        0x0002U,
-        ESP_ZB_ZCL_ATTR_TYPE_U16,
-        ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY,
-        &s_soil_max);
+    /* ---- Soil moisture via standard Relative Humidity Measurement cluster (0x0405) ----
+     * A custom 0x0408 cluster asserts in the stack's ZCL general-command path on this
+     * SDK version. Soil moisture % and relative humidity % share the same wire format
+     * (uint16, 0.01% units, 0..10000), so we report soil via the native, stack-supported
+     * humidity cluster. The zigbee2mqtt converter relabels it to soil_moisture. */
+    esp_zb_humidity_meas_cluster_cfg_t humidity_cfg = {
+        .measured_value = 0,
+        .min_value      = 0,
+        .max_value      = 10000,
+    };
+    esp_zb_attribute_list_t *humidity_attrs = esp_zb_humidity_meas_cluster_create(&humidity_cfg);
 
     /* ---- Assemble cluster list ---- */
     esp_zb_cluster_list_t *clusters = esp_zb_zcl_cluster_list_create();
@@ -243,8 +228,8 @@ static void esp_zb_task(void *pv)
                                              ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
     esp_zb_cluster_list_add_power_config_cluster(clusters, power_attrs,
                                                  ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
-    esp_zb_cluster_list_add_custom_cluster(clusters, soil_attrs,
-                                           ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+    esp_zb_cluster_list_add_humidity_meas_cluster(clusters, humidity_attrs,
+                                                  ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
     /* ---- Register endpoint ---- */
     esp_zb_ep_list_t *ep_list = esp_zb_ep_list_create();
@@ -328,13 +313,14 @@ esp_err_t zigbee_reporter_report(float soil_pct, float battery_v, float battery_
         return ESP_FAIL;
     }
 
-    /* Update ZCL attribute store and send explicit attribute-report frames. */
+    /* Update the ZCL attribute store. The stack auto-reports reportable attrs
+     * once the coordinator has configured reporting (post-interview). */
 
-    /* --- Soil Moisture cluster (0x0408) --- */
+    /* --- Soil moisture via Relative Humidity Measurement cluster (0x0405) --- */
     esp_zb_zcl_set_attribute_val(APP_ENDPOINT,
-                                 CLUSTER_ID_SOIL_MOISTURE,
+                                 ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT,
                                  ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
-                                 0x0000U,   /* MeasuredValue */
+                                 ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID,
                                  &s_soil_measured,
                                  false);
 

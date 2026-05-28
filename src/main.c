@@ -523,11 +523,16 @@ void app_main(void) {
         return;  // Never reached
     }
 
+#ifndef USE_ZIGBEE
     // Portal mode triggers: GPIO wake (button press) or never-provisioned device.
+    // WiFi-build only: the Zigbee build has no WiFi-provisioning concept (commissioning
+    // happens over Zigbee), so it must NOT gate on wifi_credentials_is_provisioned()
+    // or it would enter the SoftAP portal after a flash erase. Button UX is SP3.
     if (wake_cause == ESP_SLEEP_WAKEUP_GPIO || !wifi_credentials_is_provisioned()) {
         run_portal_then_sleep();
         return;
     }
+#endif
 
     // ------------------------------------------------------------------
     // Zero-load battery sample: must happen before WiFi/MQTT energize.

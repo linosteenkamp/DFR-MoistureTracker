@@ -166,6 +166,14 @@ static void esp_zb_task(void *pv)
     };
     esp_zb_init(&zb_cfg);
 
+    /* Keep the receiver on when idle so the coordinator can reliably interview
+     * the device (ZDO Active_EP_req etc.) and reach it during its awake window.
+     * A pure sleepy ED (rx-off) makes z2m's interview time out with
+     * "can not get active endpoints". Power cost is bounded because the deep-sleep
+     * model (Task 6) powers the radio down entirely between wakes; rx-on only
+     * applies while the device is already awake. */
+    esp_zb_set_rx_on_when_idle(true);
+
     /* ---- Basic cluster ---- */
     esp_zb_basic_cluster_cfg_t basic_cfg = {
         .zcl_version  = 8,

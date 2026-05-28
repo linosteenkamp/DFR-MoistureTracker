@@ -353,54 +353,12 @@ esp_err_t zigbee_reporter_report(float soil_pct, float battery_v, float battery_
                                  &s_batt_pct,
                                  false);
 
-    /* Send explicit report-attribute commands so z2m sees the updates immediately.
-     * Destination: coordinator (0x0000), endpoint 1 (or broadcast 0xFF — use 0xFF
-     * for z2m which accepts reports on any dst-ep when bound). */
-
-    /* Soil MeasuredValue report */
-    {
-        esp_zb_zcl_report_attr_cmd_t cmd = {
-            .zcl_basic_cmd = {
-                .dst_addr_u.addr_short = 0x0000U,  /* coordinator */
-                .dst_endpoint          = 1U,
-                .src_endpoint          = APP_ENDPOINT,
-            },
-            .address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT,
-            .clusterID    = CLUSTER_ID_SOIL_MOISTURE,
-            .attributeID  = 0x0000U,
-        };
-        esp_zb_zcl_report_attr_cmd_req(&cmd);
-    }
-
-    /* BatteryVoltage report */
-    {
-        esp_zb_zcl_report_attr_cmd_t cmd = {
-            .zcl_basic_cmd = {
-                .dst_addr_u.addr_short = 0x0000U,
-                .dst_endpoint          = 1U,
-                .src_endpoint          = APP_ENDPOINT,
-            },
-            .address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT,
-            .clusterID    = ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
-            .attributeID  = ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID,
-        };
-        esp_zb_zcl_report_attr_cmd_req(&cmd);
-    }
-
-    /* BatteryPercentageRemaining report */
-    {
-        esp_zb_zcl_report_attr_cmd_t cmd = {
-            .zcl_basic_cmd = {
-                .dst_addr_u.addr_short = 0x0000U,
-                .dst_endpoint          = 1U,
-                .src_endpoint          = APP_ENDPOINT,
-            },
-            .address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT,
-            .clusterID    = ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
-            .attributeID  = ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
-        };
-        esp_zb_zcl_report_attr_cmd_req(&cmd);
-    }
+    /* NOTE: We deliberately do NOT call esp_zb_zcl_report_attr_cmd_req() here.
+     * An explicit report on the custom Soil Moisture cluster (0x0408) asserts
+     * inside the stack (zcl/zcl_general_commands.c) and crash-loops the device,
+     * which also blocks z2m's interview. Updating the attribute value is enough:
+     * z2m reads it during interview, and the stack auto-reports the reportable
+     * attributes once the coordinator has configured reporting (post-interview). */
 
     esp_zb_lock_release();
 

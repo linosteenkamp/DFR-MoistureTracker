@@ -517,7 +517,8 @@ Moisture cluster (0x0408) asserts; both use the same 0.01% uint16 wire format.
 
 - Battery SoC reads high during daylight solar charging (terminal sits at charger CV voltage).
 - Commissioning is auto-steer-on-boot only; button-driven pairing arrives in SP3.
-- The e-paper is refreshed on the WiFi build; Zigbee-path display refresh is not yet wired.
+- The e-paper refreshes after each periodic report, on a dedicated task so the
+  ~2 s full refresh runs off the Zigbee stack loop.
 
 ## Resources
 

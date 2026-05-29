@@ -87,12 +87,11 @@ RTC_DATA_ATTR static bool s_low_battery_shown = false;
 #define uS_TO_S_FACTOR          1000000ULL               ///< Conversion factor for microseconds to seconds
 
 #ifdef USE_ZIGBEE
-#define ZIGBEE_REPORT_INTERVAL_SEC  900                  ///< Zigbee deep-sleep report interval (15 min)
-#define ZIGBEE_TX_DRAIN_MS          1500                 ///< Wait for report TX to complete before sleeping
+#define ZIGBEE_REPORT_INTERVAL_SEC  60                   ///< Zigbee managed-sleep report interval (seconds)
 #endif
 
 #ifdef DISABLE_DEEP_SLEEP
-#define TEST_PUBLISH_INTERVAL_MS 5000                    ///< Test-mode re-publish cadence
+#define TEST_PUBLISH_INTERVAL_MS 5000                    ///< Test-mode re-publish cadence (WiFi path only)
 #endif
 
 // ============================================================================
@@ -460,6 +459,26 @@ static void run_portal_then_sleep(void) {
 }
 
 // ============================================================================
+// Zigbee Sensor Sampling Callback
+// ============================================================================
+
+#ifdef USE_ZIGBEE
+/**
+ * @brief Sample all sensors and return their values.
+ *
+ * Called from the Zigbee stack scheduler context (periodic_report_cb).
+ * Reads the battery voltage and soil moisture and converts to the three
+ * values the Zigbee reporter needs.
+ */
+static void zb_sample_sensors(float *soil_pct, float *battery_v, float *battery_pct)
+{
+    *battery_v   = battery_monitor_read_voltage();
+    *soil_pct    = soil_moisture_read_percentage();
+    *battery_pct = battery_monitor_v_to_pct(*battery_v);
+}
+#endif /* USE_ZIGBEE */
+
+// ============================================================================
 // Application Entry Point
 // ============================================================================
 
@@ -563,43 +582,28 @@ void app_main(void) {
     g_cached_battery_v = ocv;               // reused by publish_telemetry_once()
 
 #ifdef USE_ZIGBEE
-    // --- Zigbee transport path (Tasks 3+) ---
+    // --- Zigbee transport path: managed light-sleep model ---
+    zigbee_reporter_set_sample_cb(zb_sample_sensors);
+    zigbee_reporter_set_interval_ms((uint32_t)ZIGBEE_REPORT_INTERVAL_SEC * 1000U);
+
     if (zigbee_reporter_init() != ESP_OK) {
         ESP_LOGE(TAG, "Zigbee init failed, sleeping");
         enter_deep_sleep(DEEP_SLEEP_INTERVAL_SEC);
         return;
     }
-    bool zb_joined = zigbee_reporter_wait_ready(30000);
-    if (zb_joined) {
+
+    if (zigbee_reporter_wait_ready(30000)) {
         ESP_LOGI(TAG, "Zigbee ready (joined)");
     } else {
-        ESP_LOGW(TAG, "Zigbee not ready (not joined yet)");
+        ESP_LOGW(TAG, "Zigbee not ready (not joined yet) — stack keeps trying");
     }
 
-    /* Task 4: read sensors and report once on every wake (or bench tick). */
-    {
-        float soil    = soil_moisture_read_percentage();
-        float batt_pct = battery_monitor_v_to_pct(g_cached_battery_v);
-        zigbee_reporter_report(soil, g_cached_battery_v, batt_pct);
-    }
-
-#ifdef DISABLE_DEEP_SLEEP
-    /* Bench testing: stay awake so the USB-Serial-JTAG stays up (deep sleep
-     * powers it down) and the Zigbee task keeps steering/retrying in the
-     * background.  Re-read and re-report every 5 s so z2m shows live updates. */
-    ESP_LOGW(TAG, "DISABLE_DEEP_SLEEP set - staying awake, reporting every 5 s");
-    while (1) {
-        vTaskDelay(pdMS_TO_TICKS(5000));
-        float s  = soil_moisture_read_percentage();
-        float bp = battery_monitor_v_to_pct(g_cached_battery_v);
-        zigbee_reporter_report(s, g_cached_battery_v, bp);
-    }
-#else
-    /* Let the report frame(s) transmit before powering the radio down. */
-    vTaskDelay(pdMS_TO_TICKS(ZIGBEE_TX_DRAIN_MS));
-    enter_deep_sleep(ZIGBEE_REPORT_INTERVAL_SEC);
+    /* Managed light-sleep: the Zigbee stack task stays alive and pushes periodic
+     * reports via the scheduler (periodic_report_cb). app_main returns here;
+     * the stack continues running in its own FreeRTOS task.
+     * DISABLE_DEEP_SLEEP now only controls whether esp_zb_sleep_enable() is
+     * called inside zigbee_reporter.c — no loop or sleep needed here. */
     return;
-#endif
 #else
     // Step 2: Setup WiFi (handles provisioning if needed)
     if (setup_wifi() != ESP_OK) {

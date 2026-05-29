@@ -56,6 +56,24 @@ static const char *TAG = "ZB_RPT";
 /* Joined flag — set by the signal handler, polled by zigbee_reporter_wait_ready(). */
 static volatile bool s_joined = false;
 
+/* Managed-sleep / periodic-report state. */
+static zigbee_sample_cb_t s_sample_cb        = NULL;
+static uint32_t           s_report_interval_ms = 900000U; /* 15 min default */
+
+void zigbee_reporter_set_sample_cb(zigbee_sample_cb_t cb)
+{
+    s_sample_cb = cb;
+}
+
+void zigbee_reporter_set_interval_ms(uint32_t interval_ms)
+{
+    s_report_interval_ms = interval_ms;
+}
+
+/* Forward declaration — periodic_report_cb is defined later in the file but
+ * referenced from esp_zb_app_signal_handler, which appears before it. */
+static void periodic_report_cb(uint8_t param);
+
 /* Thin wrapper so we can pass network-steering as an esp_zb_scheduler_alarm callback.
  * esp_zb_bdb_start_top_level_commissioning is a #define (not a real function), so
  * it cannot be used as a function pointer directly. */
@@ -114,6 +132,8 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                 ESP_LOGI(TAG, "Rebooted onto existing network, short addr 0x%04hx",
                          esp_zb_get_short_address());
                 s_joined = true;
+                /* Schedule the first periodic report ~1 s after rejoin. */
+                esp_zb_scheduler_alarm(periodic_report_cb, 0, 1000U);
             }
         } else {
             ESP_LOGW(TAG, "%s: status %d",
@@ -127,6 +147,8 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
             ESP_LOGI(TAG, "BDB steering complete — joined network, short addr 0x%04hx",
                      esp_zb_get_short_address());
             s_joined = true;
+            /* Schedule the first periodic report ~1 s after fresh join. */
+            esp_zb_scheduler_alarm(periodic_report_cb, 0, 1000U);
         } else {
             ESP_LOGW(TAG, "BDB steering failed (status %d), retrying in 1 s", err_status);
             /* Schedule a retry.  We use the wrapper because esp_zb_bdb_start_top_level_commissioning
@@ -137,11 +159,76 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
         }
         break;
 
+    case ESP_ZB_COMMON_SIGNAL_CAN_SLEEP:
+        /* Stack has nothing to do — enter light sleep until the next scheduled event. */
+        esp_zb_sleep_now();
+        break;
+
     default:
         ESP_LOGI(TAG, "ZDO signal: %s (0x%x), status: %d",
                  esp_zb_zdo_signal_to_string(sig_type), (unsigned)sig_type, err_status);
         break;
     }
+}
+
+/* ============================================================
+ * No-lock attribute update helper (call ONLY from stack task context)
+ * ============================================================ */
+
+/* Update the three ZCL attributes WITHOUT taking the Zigbee lock.
+ * This must only be called from within the Zigbee stack task context
+ * (e.g. from a scheduler alarm callback), where the lock is already
+ * held implicitly. Taking the lock here would deadlock. */
+static void update_attributes_no_lock(float soil_pct, float battery_v, float battery_pct)
+{
+    uint16_t soil = zigbee_encode_soil_pct(soil_pct);
+    uint8_t  volt = zigbee_encode_batt_voltage(battery_v);
+    uint8_t  pct  = zigbee_encode_batt_pct(battery_pct);
+
+    s_soil_measured = soil;
+    s_batt_voltage  = volt;
+    s_batt_pct      = pct;
+
+    esp_zb_zcl_set_attribute_val(APP_ENDPOINT,
+                                 ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT,
+                                 ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                                 ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID,
+                                 &s_soil_measured,
+                                 false);
+
+    esp_zb_zcl_set_attribute_val(APP_ENDPOINT,
+                                 ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+                                 ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                                 ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID,
+                                 &s_batt_voltage,
+                                 false);
+
+    esp_zb_zcl_set_attribute_val(APP_ENDPOINT,
+                                 ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+                                 ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                                 ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
+                                 &s_batt_pct,
+                                 false);
+}
+
+/* ============================================================
+ * Periodic scheduler callback — runs in Zigbee stack task context
+ * ============================================================ */
+
+static void periodic_report_cb(uint8_t param)
+{
+    (void)param;
+    if (s_sample_cb) {
+        float soil = 0.0f, bv = 0.0f, bp = 0.0f;
+        s_sample_cb(&soil, &bv, &bp);
+        /* No-lock update: we are already in the Zigbee stack context. */
+        update_attributes_no_lock(soil, bv, bp);
+        ESP_LOGI(TAG, "periodic report: soil=%.1f%% batt=%.2fV (%.0f%%)", soil, bv, bp);
+    } else {
+        ESP_LOGW(TAG, "periodic_report_cb: no sample callback registered");
+    }
+    /* Re-arm the alarm for the next cycle. */
+    esp_zb_scheduler_alarm(periodic_report_cb, 0, s_report_interval_ms);
 }
 
 /* ============================================================
@@ -285,6 +372,14 @@ static void esp_zb_task(void *pv)
     /* Scan all 2.4 GHz channels (11–26). */
     esp_zb_set_primary_network_channel_set(ESP_ZB_TRANSCEIVER_ALL_CHANNELS_MASK);
 
+    /* Enable managed light-sleep so the stack can idle between scheduler events.
+     * Skipped in the bench build (DISABLE_DEEP_SLEEP) so USB-Serial-JTAG stays up. */
+#ifndef DISABLE_DEEP_SLEEP
+    esp_zb_sleep_enable(true);
+    /* Minimum idle time before the scheduler signals CAN_SLEEP (ms). */
+    esp_zb_sleep_set_threshold(2000);
+#endif
+
     /* Start the stack (autostart=false — we drive commissioning via signal handler). */
     ESP_ERROR_CHECK(esp_zb_start(false));
 
@@ -335,49 +430,14 @@ bool zigbee_reporter_wait_ready(uint32_t timeout_ms)
 
 esp_err_t zigbee_reporter_report(float soil_pct, float battery_v, float battery_pct)
 {
-    /* Encode float values into ZCL wire formats. */
-    uint16_t soil = zigbee_encode_soil_pct(soil_pct);
-    uint8_t  volt = zigbee_encode_batt_voltage(battery_v);
-    uint8_t  pct  = zigbee_encode_batt_pct(battery_pct);
-
-    /* Update the static storage that the cluster's attribute table points to.
-     * Do this BEFORE set_attribute_val so both the pointer and the set value agree. */
-    s_soil_measured = soil;
-    s_batt_voltage  = volt;
-    s_batt_pct      = pct;
-
-    /* Take the Zigbee stack lock before touching ZCL data structures.
-     * esp_zb_lock_acquire returns true if the lock was acquired. */
+    /* Caller is an external FreeRTOS task (not the Zigbee stack task), so we
+     * must take the Zigbee lock before touching ZCL data structures. */
     if (!esp_zb_lock_acquire(portMAX_DELAY)) {
         ESP_LOGE(TAG, "Failed to acquire Zigbee lock");
         return ESP_FAIL;
     }
 
-    /* Update the ZCL attribute store. The stack auto-reports reportable attrs
-     * once the coordinator has configured reporting (post-interview). */
-
-    /* --- Soil moisture via Relative Humidity Measurement cluster (0x0405) --- */
-    esp_zb_zcl_set_attribute_val(APP_ENDPOINT,
-                                 ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT,
-                                 ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
-                                 ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID,
-                                 &s_soil_measured,
-                                 false);
-
-    /* --- Power Configuration cluster (0x0001) --- */
-    esp_zb_zcl_set_attribute_val(APP_ENDPOINT,
-                                 ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
-                                 ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
-                                 ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID,
-                                 &s_batt_voltage,
-                                 false);
-
-    esp_zb_zcl_set_attribute_val(APP_ENDPOINT,
-                                 ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
-                                 ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
-                                 ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
-                                 &s_batt_pct,
-                                 false);
+    update_attributes_no_lock(soil_pct, battery_v, battery_pct);
 
     /* NOTE: esp_zb_zcl_report_attr_cmd_req() asserts in this SDK version
      * (zcl_general_commands.c:612) for both custom AND standard clusters, so we
@@ -387,8 +447,8 @@ esp_err_t zigbee_reporter_report(float soil_pct, float battery_v, float battery_
 
     esp_zb_lock_release();
 
-    ESP_LOGI(TAG, "reported soil=%u(%.1f%%) volt=%u pct=%u",
-             soil, soil_pct, volt, pct);
+    ESP_LOGI(TAG, "reported (external) soil=%.1f%% batt=%.2fV (%.0f%%)",
+             soil_pct, battery_v, battery_pct);
 
     return ESP_OK;
 }

@@ -15,3 +15,10 @@ CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 # Custom partition table (adds zb_storage / zb_fct)
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# Power management — required for esp_zb_sleep_enable() to actually engage light
+# sleep. esp_zb just *permits* sleep; the chip only enters automatic light sleep
+# if the PM framework is enabled AND the FreeRTOS scheduler skips ticks while
+# idle. Without these, the CPU sits at full speed and burns the battery overnight.
+CONFIG_PM_ENABLE=y
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=y

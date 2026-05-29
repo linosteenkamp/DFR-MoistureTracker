@@ -46,6 +46,7 @@
 #include "zcl/esp_zigbee_zcl_command.h"  /* esp_zb_zcl_report_attr_cmd_t, esp_zb_zcl_report_attr_cmd_req */
 
 #include "esp_log.h"
+#include "esp_pm.h"                /* esp_pm_configure — required so esp_zb_sleep_enable() actually sleeps */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "aps/esp_zigbee_aps.h"  /* ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT */
@@ -289,18 +290,22 @@ static void esp_zb_task(void *pv)
         .install_code_policy = false,
         .nwk_cfg.zed_cfg = {
             .ed_timeout  = ESP_ZB_ED_AGING_TIMEOUT_64MIN,
-            .keep_alive  = 3000U,   /* ms between keep-alive polls to parent */
+            /* Poll interval (ms): the device wakes the radio this often to fetch
+             * any z2m downlink the parent has buffered. 15 s trades up-to-15-s
+             * downlink latency for a ~5x reduction in poll-wake power vs 3 s; well
+             * inside ed_timeout (64 min). Uplink reports are unaffected. */
+            .keep_alive  = 15000U,
         },
     };
     esp_zb_init(&zb_cfg);
 
-    /* Keep the receiver on when idle so the coordinator can reliably interview
-     * the device (ZDO Active_EP_req etc.) and reach it during its awake window.
-     * A pure sleepy ED (rx-off) makes z2m's interview time out with
-     * "can not get active endpoints". Power cost is bounded because the deep-sleep
-     * model (Task 6) powers the radio down entirely between wakes; rx-on only
-     * applies while the device is already awake. */
-    esp_zb_set_rx_on_when_idle(true);
+    /* True sleepy ED — radio off when idle. z2m reaches the device by buffering
+     * downlinks at the parent and delivering them on the next keep_alive poll
+     * (15 s). The earlier "interview times out / can not get active endpoints"
+     * problem was the custom-cluster assert, not rx-off; with that fixed, sleepy
+     * interview works fine, just slower. Leaving rx-on burns tens of mA — the
+     * single biggest power saving on this device. */
+    esp_zb_set_rx_on_when_idle(false);
 
     /* ---- Basic cluster ---- */
     esp_zb_basic_cluster_cfg_t basic_cfg = {
@@ -398,6 +403,19 @@ static void esp_zb_task(void *pv)
     /* Enable managed light-sleep so the stack can idle between scheduler events.
      * Skipped in the bench build (DISABLE_DEEP_SLEEP) so USB-Serial-JTAG stays up. */
 #ifndef DISABLE_DEEP_SLEEP
+    /* Configure the ESP-IDF power-management framework BEFORE enabling Zigbee
+     * sleep. esp_zb_sleep_enable() only *permits* sleep — the chip actually
+     * enters automatic light sleep only when PM is configured AND the FreeRTOS
+     * scheduler is in tickless-idle mode (both gated on by the sdkconfig
+     * additions in sdkconfig.defaults.zigbee). Without this call the CPU runs at
+     * 160 MHz forever and the battery drains overnight. */
+    esp_pm_config_t pm_cfg = {
+        .max_freq_mhz       = 160,   /* C6 nominal */
+        .min_freq_mhz       = 40,    /* XTAL freq — lowest stable DFS step */
+        .light_sleep_enable = true,
+    };
+    ESP_ERROR_CHECK(esp_pm_configure(&pm_cfg));
+
     esp_zb_sleep_enable(true);
     /* Minimum idle time before the scheduler signals CAN_SLEEP (ms). */
     esp_zb_sleep_set_threshold(2000);

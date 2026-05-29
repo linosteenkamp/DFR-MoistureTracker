@@ -86,6 +86,11 @@ RTC_DATA_ATTR static bool s_low_battery_shown = false;
 #define DEEP_SLEEP_INTERVAL_SEC  3600                    ///< Deep sleep duration in seconds (3600 = 1 hour)
 #define uS_TO_S_FACTOR          1000000ULL               ///< Conversion factor for microseconds to seconds
 
+#ifdef USE_ZIGBEE
+#define ZIGBEE_REPORT_INTERVAL_SEC  900                  ///< Zigbee deep-sleep report interval (15 min)
+#define ZIGBEE_TX_DRAIN_MS          1500                 ///< Wait for report TX to complete before sleeping
+#endif
+
 #ifdef DISABLE_DEEP_SLEEP
 #define TEST_PUBLISH_INTERVAL_MS 5000                    ///< Test-mode re-publish cadence
 #endif
@@ -590,7 +595,9 @@ void app_main(void) {
         zigbee_reporter_report(s, g_cached_battery_v, bp);
     }
 #else
-    enter_deep_sleep(DEEP_SLEEP_INTERVAL_SEC);
+    /* Let the report frame(s) transmit before powering the radio down. */
+    vTaskDelay(pdMS_TO_TICKS(ZIGBEE_TX_DRAIN_MS));
+    enter_deep_sleep(ZIGBEE_REPORT_INTERVAL_SEC);
     return;
 #endif
 #else

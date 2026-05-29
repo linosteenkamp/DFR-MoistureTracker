@@ -9,10 +9,19 @@
  * stack context on the report schedule. */
 typedef void (*zigbee_sample_cb_t)(float *soil_pct, float *battery_v, float *battery_pct);
 
+/* Invoked from the Zigbee stack context after each periodic report, with the
+ * values that were just published. Keep the handler cheap and non-blocking —
+ * any slow work (e.g. an e-paper refresh) must be deferred to its own task so it
+ * does not stall the stack main loop. */
+typedef void (*zigbee_report_done_cb_t)(float soil_pct, float battery_v, float battery_pct);
+
 /* Register the sampling callback and the report interval (milliseconds).
  * Must be called before zigbee_reporter_init(). */
 void zigbee_reporter_set_sample_cb(zigbee_sample_cb_t cb);
 void zigbee_reporter_set_interval_ms(uint32_t interval_ms);
+
+/* Optional: register a handler invoked after each periodic report. */
+void zigbee_reporter_set_report_done_cb(zigbee_report_done_cb_t cb);
 
 /* Start the Zigbee stack as an end-device.
  * Restores persisted network state if already joined, otherwise begins BDB

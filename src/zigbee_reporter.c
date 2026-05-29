@@ -57,8 +57,9 @@ static const char *TAG = "ZB_RPT";
 static volatile bool s_joined = false;
 
 /* Managed-sleep / periodic-report state. */
-static zigbee_sample_cb_t s_sample_cb        = NULL;
-static uint32_t           s_report_interval_ms = 900000U; /* 15 min default */
+static zigbee_sample_cb_t      s_sample_cb        = NULL;
+static zigbee_report_done_cb_t s_report_done_cb   = NULL;
+static uint32_t                s_report_interval_ms = 900000U; /* 15 min default */
 
 void zigbee_reporter_set_sample_cb(zigbee_sample_cb_t cb)
 {
@@ -68,6 +69,11 @@ void zigbee_reporter_set_sample_cb(zigbee_sample_cb_t cb)
 void zigbee_reporter_set_interval_ms(uint32_t interval_ms)
 {
     s_report_interval_ms = interval_ms;
+}
+
+void zigbee_reporter_set_report_done_cb(zigbee_report_done_cb_t cb)
+{
+    s_report_done_cb = cb;
 }
 
 /* Forward declaration — periodic_report_cb is defined later in the file but
@@ -224,6 +230,11 @@ static void periodic_report_cb(uint8_t param)
         /* No-lock update: we are already in the Zigbee stack context. */
         update_attributes_no_lock(soil, bv, bp);
         ESP_LOGI(TAG, "periodic report: soil=%.1f%% batt=%.2fV (%.0f%%)", soil, bv, bp);
+        if (s_report_done_cb) {
+            /* Handler must be cheap (it runs in the stack loop); it defers the
+             * actual e-paper refresh to its own task. */
+            s_report_done_cb(soil, bv, bp);
+        }
     } else {
         ESP_LOGW(TAG, "periodic_report_cb: no sample callback registered");
     }

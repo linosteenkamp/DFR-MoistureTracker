@@ -30,6 +30,7 @@
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "esp_system.h"
 #include "esp_log.h"
 #include "esp_sleep.h"
@@ -476,6 +477,48 @@ static void zb_sample_sensors(float *soil_pct, float *battery_v, float *battery_
     *soil_pct    = soil_moisture_read_percentage();
     *battery_pct = battery_monitor_v_to_pct(*battery_v);
 }
+
+/* --- Deferred e-paper refresh ------------------------------------------------
+ * The Zigbee report-done callback runs in the stack main-loop context, where a
+ * ~2 s blocking SSD1680 full refresh would stall keep-alives and frame handling.
+ * So the callback only latches the latest values and signals a dedicated task,
+ * which owns the slow SPI work off the stack loop. */
+static SemaphoreHandle_t s_display_sem  = NULL;
+static volatile float    s_disp_soil    = 0.0f;
+static volatile float    s_disp_batt_v  = 0.0f;
+static volatile int      s_disp_batt_pct = 0;
+
+static void zb_report_done(float soil_pct, float battery_v, float battery_pct)
+{
+    s_disp_soil     = soil_pct;
+    s_disp_batt_v   = battery_v;
+    s_disp_batt_pct = (int)(battery_pct + 0.5f);
+    if (s_display_sem) {
+        xSemaphoreGive(s_display_sem);
+    }
+}
+
+static void zb_display_task(void *pv)
+{
+    (void)pv;
+    for (;;) {
+        if (xSemaphoreTake(s_display_sem, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        display_telemetry_t dt = {
+            .device_id     = device_id_buffer,
+            .moisture_pct  = s_disp_soil,
+            .raw_mv        = soil_moisture_read_raw_mv(),
+            .battery_v     = s_disp_batt_v,
+            .battery_pct   = s_disp_batt_pct,
+            .wifi_rssi_dbm = 0,   // no WiFi in Zigbee mode
+        };
+        if (display_init() == ESP_OK) {
+            display_show_telemetry(&dt);
+            display_deinit();
+        }
+    }
+}
 #endif /* USE_ZIGBEE */
 
 // ============================================================================
@@ -583,6 +626,23 @@ void app_main(void) {
 
 #ifdef USE_ZIGBEE
     // --- Zigbee transport path: managed light-sleep model ---
+    // device_id_buffer is normally filled by setup_mqtt() (WiFi path), which the
+    // Zigbee path never calls — load it here so the e-paper shows the right ID.
+    if (!wifi_credentials_load_device_id(device_id_buffer, sizeof(device_id_buffer))) {
+        strncpy(device_id_buffer, DEFAULT_DEVICE_ID, sizeof(device_id_buffer) - 1);
+        device_id_buffer[sizeof(device_id_buffer) - 1] = '\0';
+    }
+
+    // Start the deferred e-paper refresh task and have the reporter signal it
+    // after each periodic report.
+    s_display_sem = xSemaphoreCreateBinary();
+    if (s_display_sem != NULL) {
+        xTaskCreate(zb_display_task, "zb_display", 4096, NULL, 4, NULL);
+        zigbee_reporter_set_report_done_cb(zb_report_done);
+    } else {
+        ESP_LOGW(TAG, "Display semaphore alloc failed — e-paper refresh disabled");
+    }
+
     zigbee_reporter_set_sample_cb(zb_sample_sensors);
     zigbee_reporter_set_interval_ms((uint32_t)ZIGBEE_REPORT_INTERVAL_SEC * 1000U);
 

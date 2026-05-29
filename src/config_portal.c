@@ -42,6 +42,26 @@ static void html_escape_attr(const char *in, char *out, size_t out_len) {
 #define PORTAL_TIMEOUT_SEC   600
 #define IDLE_TICK_MS         1000
 
+#ifdef USE_ZIGBEE
+static const char *html_menu =
+    "<!DOCTYPE html><html><head><title>FireBeetle Config</title>"
+    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<style>body{font-family:Arial;margin:40px;background:#f0f0f0}"
+    ".container{background:white;padding:30px;border-radius:10px;max-width:400px;margin:auto}"
+    "a.btn{display:block;padding:14px;margin:10px 0;background:#4CAF50;color:white;"
+    "text-align:center;text-decoration:none;border-radius:4px}"
+    "a.btn.danger{background:#d9534f}"
+    "form{margin:0}button.btn{display:block;width:100%;padding:14px;margin:10px 0;"
+    "background:#337ab7;color:white;border:none;border-radius:4px;font-size:15px;cursor:pointer}"
+    "</style></head>"
+    "<body><div class='container'><h2>FireBeetle C6 (Zigbee)</h2>"
+    "<a class='btn' href='/name'>Set Sensor Name</a>"
+    "<a class='btn' href='/calibrate'>Calibrate Sensor</a>"
+    "<a class='btn' href='/status'>Status</a>"
+    "<form action='/reboot' method='POST'><button class='btn' type='submit'>Done \xE2\x80\x94 Reboot</button></form>"
+    "<a class='btn danger' href='/factory-reset'>Factory Reset</a>"
+    "</div></body></html>";
+#else
 static const char *html_menu =
     "<!DOCTYPE html><html><head><title>FireBeetle Config</title>"
     "<meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -56,6 +76,7 @@ static const char *html_menu =
     "<a class='btn' href='/status'>Status</a>"
     "<a class='btn danger' href='/factory-reset'>Factory Reset</a>"
     "</div></body></html>";
+#endif
 
 static const char *html_wifi_saved =
     "<!DOCTYPE html><html><body><h1>WiFi saved.</h1>"
@@ -224,6 +245,92 @@ static esp_err_t wifi_post(httpd_req_t *req) {
     esp_restart();
     return ESP_OK;
 }
+
+#ifdef USE_ZIGBEE
+static esp_err_t name_get(httpd_req_t *req) {
+    s_idle_ticks = 0;
+
+    char device_id[33] = {0};
+    bool has_id = wifi_credentials_load_device_id(device_id, sizeof(device_id));
+    char id_esc[33 * 6];
+    html_escape_attr(has_id ? device_id : "", id_esc, sizeof(id_esc));
+
+    const size_t body_len = 1024;
+    char *body = malloc(body_len);
+    if (!body) { httpd_resp_send_500(req); return ESP_FAIL; }
+    snprintf(body, body_len,
+        "<!DOCTYPE html><html><head><title>Sensor Name</title>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<style>body{font-family:Arial;margin:40px;background:#f0f0f0}"
+        ".container{background:white;padding:30px;border-radius:10px;max-width:400px;margin:auto}"
+        "input{width:100%%;padding:10px;margin:10px 0;box-sizing:border-box}"
+        "button{background:#4CAF50;color:white;padding:14px;border:none;width:100%%;cursor:pointer;font-size:16px}"
+        "a{display:block;text-align:center;margin-top:14px}</style></head>"
+        "<body><div class='container'><h2>Sensor Name</h2>"
+        "<p>Shown on the display and published to MQTT as <code>label</code> "
+        "(used by Node-RED). Max 16 characters.</p>"
+        "<form action='/name' method='POST'>"
+        "<label>Sensor name:</label>"
+        "<input type='text' name='device_id' value='%s' maxlength='16' placeholder='greenhouse01' required>"
+        "<button type='submit'>Save &amp; Reboot</button></form>"
+        "<a href='/'>Back</a></div></body></html>",
+        id_esc);
+
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    esp_err_t err = httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+    free(body);
+    return err;
+}
+
+static esp_err_t name_post(httpd_req_t *req) {
+    s_idle_ticks = 0;
+    int total = req->content_len;
+    if (total <= 0 || total > 512) { httpd_resp_send_500(req); return ESP_FAIL; }
+    char *buf = malloc(total + 1);
+    if (!buf) { httpd_resp_send_500(req); return ESP_FAIL; }
+    int got = 0;
+    while (got < total) {
+        int r = httpd_req_recv(req, buf + got, total - got);
+        if (r <= 0) { free(buf); httpd_resp_send_500(req); return ESP_FAIL; }
+        got += r;
+    }
+    buf[total] = '\0';
+
+    char device_id[33] = {0};
+    form_field_t fields[] = {
+        {"device_id", device_id, sizeof(device_id)},
+    };
+    bool ok = form_parser_extract(buf, fields, 1);
+    free(buf);
+    if (!ok || device_id[0] == '\0') { httpd_resp_send_500(req); return ESP_FAIL; }
+
+    // Cap at 16 chars to match the Zigbee LocationDescription limit.
+    if (strlen(device_id) > 16) device_id[16] = '\0';
+
+    if (wifi_credentials_save_device_id(device_id) != ESP_OK) {
+        httpd_resp_send_500(req); return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_send(req,
+        "<html><body><h1>Saved. Rebooting\xe2\x80\xa6</h1></body></html>",
+        HTTPD_RESP_USE_STRLEN);
+    vTaskDelay(pdMS_TO_TICKS(1500));
+    esp_restart();   // RTC flag already cleared -> boots back into Zigbee
+    return ESP_OK;
+}
+
+static esp_err_t reboot_post(httpd_req_t *req) {
+    s_idle_ticks = 0;
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_send(req,
+        "<html><body><h1>Rebooting\xe2\x80\xa6</h1></body></html>",
+        HTTPD_RESP_USE_STRLEN);
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
+    return ESP_OK;
+}
+#endif /* USE_ZIGBEE */
 
 static esp_err_t calibrate_get(httpd_req_t *req) {
     s_idle_ticks = 0;
@@ -399,6 +506,15 @@ static esp_err_t start_http(void) {
     httpd_uri_t wifi_p = {.uri = "/wifi", .method = HTTP_POST, .handler = wifi_post, .user_ctx = NULL};
     httpd_register_uri_handler(s_server, &wifi_g);
     httpd_register_uri_handler(s_server, &wifi_p);
+
+#ifdef USE_ZIGBEE
+    httpd_uri_t name_g = {.uri = "/name",   .method = HTTP_GET,  .handler = name_get};
+    httpd_uri_t name_p = {.uri = "/name",   .method = HTTP_POST, .handler = name_post};
+    httpd_uri_t rb_p   = {.uri = "/reboot", .method = HTTP_POST, .handler = reboot_post};
+    httpd_register_uri_handler(s_server, &name_g);
+    httpd_register_uri_handler(s_server, &name_p);
+    httpd_register_uri_handler(s_server, &rb_p);
+#endif
 
     httpd_uri_t cal_g  = {.uri = "/calibrate",         .method = HTTP_GET,  .handler = calibrate_get};
     httpd_uri_t cal_r  = {.uri = "/api/reading",       .method = HTTP_GET,  .handler = api_reading_get};

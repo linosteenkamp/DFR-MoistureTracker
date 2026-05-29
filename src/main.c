@@ -679,9 +679,13 @@ void app_main(void) {
     // Clear the flag first so a crash mid-portal returns to normal operation.
     if (s_config_requested) {
         s_config_requested = false;
-        ESP_LOGI(TAG, "Config requested — portal wired in Task 3");
-        // Task 3 replaces this stub with:
-        //   display + config_portal_run() + esp_restart();
+        ESP_LOGI(TAG, "Entering config portal (button-triggered)");
+        if (display_init() == ESP_OK) {
+            display_show_portal();
+            display_deinit();
+        }
+        config_portal_run();   // blocks until a save handler restarts, or idle timeout
+        esp_restart();         // idle-timeout path: reboot back into Zigbee
     }
 #endif
 

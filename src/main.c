@@ -87,7 +87,7 @@ RTC_DATA_ATTR static bool s_low_battery_shown = false;
 #define uS_TO_S_FACTOR          1000000ULL               ///< Conversion factor for microseconds to seconds
 
 #ifdef USE_ZIGBEE
-#define ZIGBEE_REPORT_INTERVAL_SEC  60                   ///< Zigbee managed-sleep report interval (seconds)
+#define ZIGBEE_REPORT_INTERVAL_SEC  900                  ///< Zigbee managed-sleep report interval (seconds, 15 min)
 #endif
 
 #ifdef DISABLE_DEEP_SLEEP

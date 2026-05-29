@@ -57,6 +57,12 @@ periodic reports via a scheduler alarm. Soil rides the standard Humidity cluster
 `DEVELOPER_GUIDE.md` for the full pairing/verification flow and the z2m converter
 (`z2m/dfr_soil_moisture.js`).
 
+A short press of the GPIO7 button reboots the Zigbee build into the SoftAP config
+portal (calibration + sensor name; no WiFi-station setup), then reboots back into
+Zigbee. The sensor name is stored in NVS (`device_id`), shown on the e-paper, and
+exposed over Zigbee via Basic LocationDescription (0x0010) → surfaced by the z2m
+converter as the `label` MQTT field for Node-RED.
+
 There are no automated tests — validation is manual via serial monitor. See the checklist in `DEVELOPER_GUIDE.md`.
 
 ## Credentials Setup (Required Before First Build)

@@ -513,10 +513,29 @@ Moisture cluster (0x0408) asserts; both use the same 0.01% uint16 wire format.
 - [ ] `battery` % and voltage are plausible (note: inflated while solar-charging — known limitation).
 - [ ] ≥3 consecutive report cycles without a new join logged (rejoin-free; confirms the device stays associated).
 
+### On-device config (SP2)
+
+A short press of the **GPIO7 button** reboots the device into a SoftAP config
+portal (`FireBeetle_C6_Prov`, `http://192.168.4.1`) with **no WiFi-station setup** —
+the Zigbee stack is not running in this mode, so there is no radio coexistence
+issue. From a phone you can:
+
+- **Set Sensor Name** — persisted to NVS (`device_id`), shown on the e-paper, and
+  written to the Basic cluster LocationDescription (0x0010). The z2m converter
+  surfaces it as the `label` field in every MQTT payload, so Node-RED can identify
+  the physical sensor. Max 16 characters.
+- **Calibrate Sensor** — the standard dry/wet capture flow with live mV readout.
+- **Done – Reboot** — returns immediately to normal Zigbee operation (otherwise the
+  portal exits on a 10-minute idle timeout).
+
+The device reboots back into Zigbee on save/reboot and auto-rejoins with its
+persisted network credentials.
+
 ### Known limitations (SP1)
 
 - Battery SoC reads high during daylight solar charging (terminal sits at charger CV voltage).
-- Commissioning is auto-steer-on-boot only; button-driven pairing arrives in SP3.
+- Pairing is auto-steer-on-boot only; button-driven *pairing* arrives in SP3
+  (the GPIO7 button is used for the config portal in SP2 — see above).
 - The e-paper refreshes after each periodic report, on a dedicated task so the
   ~2 s full refresh runs off the Zigbee stack loop.
 

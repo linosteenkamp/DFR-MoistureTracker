@@ -70,6 +70,10 @@ static float g_cached_battery_v = 0.0f;
 // so we don't burn ~30 mJ refreshing the e-paper every hour while the cell is starved.
 RTC_DATA_ATTR static bool s_low_battery_shown = false;
 
+// Set by the GPIO7 trigger task before esp_restart(); read once early in
+// app_main() to enter config-portal mode. RTC memory survives the soft reset.
+RTC_DATA_ATTR static bool s_config_requested = false;
+
 // ============================================================================
 // Application Configuration
 // ============================================================================
@@ -464,6 +468,74 @@ static void run_portal_then_sleep(void) {
 // ============================================================================
 
 #ifdef USE_ZIGBEE
+// --- GPIO7 config-portal entry (Zigbee build) ---------------------------------
+// The Zigbee build runs managed light sleep (CPU mostly halted between radio
+// events), so the deep-sleep GPIO-wake path never runs. Instead GPIO7 is armed
+// as a light-sleep wake source with a falling-edge ISR. A press wakes the CPU,
+// the ISR signals s_config_btn_sem, and config_trigger_task latches the RTC flag
+// and restarts into config mode. esp_restart() is illegal in ISR context, hence
+// the task hop.
+static SemaphoreHandle_t s_config_btn_sem = NULL;
+
+static void IRAM_ATTR config_btn_isr(void *arg)
+{
+    (void)arg;
+    BaseType_t hp_woken = pdFALSE;
+    xSemaphoreGiveFromISR(s_config_btn_sem, &hp_woken);
+    if (hp_woken) {
+        portYIELD_FROM_ISR();
+    }
+}
+
+static void config_trigger_task(void *pv)
+{
+    (void)pv;
+    for (;;) {
+        if (xSemaphoreTake(s_config_btn_sem, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        // Debounce: require the line to still be low ~40 ms after the edge.
+        vTaskDelay(pdMS_TO_TICKS(40));
+        if (gpio_get_level(GPIO_NUM_7) != 0) {
+            continue;   // bounce/noise — ignore
+        }
+        ESP_LOGI(TAG, "GPIO7 pressed — rebooting into config mode");
+        s_config_requested = true;
+        vTaskDelay(pdMS_TO_TICKS(50));   // let the log flush
+        esp_restart();
+    }
+}
+
+static void setup_config_button(void)
+{
+    s_config_btn_sem = xSemaphoreCreateBinary();
+    if (s_config_btn_sem == NULL) {
+        ESP_LOGW(TAG, "config button sem alloc failed — button disabled");
+        return;
+    }
+
+    gpio_config_t btn = {
+        .pin_bit_mask = (1ULL << GPIO_NUM_7),
+        .mode         = GPIO_MODE_INPUT,
+        .pull_up_en   = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_NEGEDGE,
+    };
+    gpio_config(&btn);
+
+    // Wake the CPU out of managed light sleep when GPIO7 goes low.
+    gpio_wakeup_enable(GPIO_NUM_7, GPIO_INTR_LOW_LEVEL);
+    esp_sleep_enable_gpio_wakeup();
+
+    gpio_install_isr_service(0);
+    gpio_isr_handler_add(GPIO_NUM_7, config_btn_isr, NULL);
+
+    xTaskCreate(config_trigger_task, "cfg_btn", 3072, NULL, 6, NULL);
+    ESP_LOGI(TAG, "GPIO7 config button armed (light-sleep wake + ISR)");
+}
+#endif /* USE_ZIGBEE */
+
+#ifdef USE_ZIGBEE
 /**
  * @brief Sample all sensors and return their values.
  *
@@ -601,6 +673,18 @@ void app_main(void) {
     }
 #endif
 
+#ifdef USE_ZIGBEE
+    // Config-portal mode takes priority over the brownout gate: a deliberate
+    // button press should always reach config (radio is off, so power is modest).
+    // Clear the flag first so a crash mid-portal returns to normal operation.
+    if (s_config_requested) {
+        s_config_requested = false;
+        ESP_LOGI(TAG, "Config requested — portal wired in Task 3");
+        // Task 3 replaces this stub with:
+        //   display + config_portal_run() + esp_restart();
+    }
+#endif
+
     // ------------------------------------------------------------------
     // Zero-load battery sample: must happen before WiFi/MQTT energize.
     // init_system() only touches NVS, event loop, and ADC — no radio yet.
@@ -632,6 +716,7 @@ void app_main(void) {
         strncpy(device_id_buffer, DEFAULT_DEVICE_ID, sizeof(device_id_buffer) - 1);
         device_id_buffer[sizeof(device_id_buffer) - 1] = '\0';
     }
+    setup_config_button();
 
     // Start the deferred e-paper refresh task and have the reporter signal it
     // after each periodic report.

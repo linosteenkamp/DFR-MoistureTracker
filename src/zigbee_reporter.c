@@ -148,6 +148,34 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
  * Zigbee stack task — runs forever inside esp_zb_stack_main_loop()
  * ============================================================ */
 
+/* Register device-side (server) reporting for one attribute so the stack
+ * auto-sends a report when the value changes. delta is the reportable change
+ * (in the attribute's native units). */
+static void config_reporting(uint16_t cluster_id, uint16_t attr_id, uint16_t delta)
+{
+    esp_zb_zcl_reporting_info_t info = {
+        .direction    = ESP_ZB_ZCL_REPORT_DIRECTION_SEND,
+        .ep           = APP_ENDPOINT,
+        .cluster_id   = cluster_id,
+        .cluster_role = ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+        .attr_id      = attr_id,
+        .manuf_code   = ESP_ZB_ZCL_ATTR_NON_MANUFACTURER_SPECIFIC,
+        .dst.profile_id = ESP_ZB_AF_HA_PROFILE_ID,
+        .u.send_info = {
+            .min_interval     = 1,
+            .max_interval     = 0,   /* report on change only */
+            .def_min_interval = 1,
+            .def_max_interval = 0,
+            .delta.u16        = delta,
+        },
+    };
+    esp_err_t err = esp_zb_zcl_update_reporting_info(&info);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "config_reporting(cluster 0x%04x attr 0x%04x) failed: %s",
+                 cluster_id, attr_id, esp_err_to_name(err));
+    }
+}
+
 static void esp_zb_task(void *pv)
 {
     (void)pv;
@@ -241,6 +269,18 @@ static void esp_zb_task(void *pv)
     };
     esp_zb_ep_list_add_ep(ep_list, clusters, ep_cfg);
     esp_zb_device_register(ep_list);
+
+    /* Configure device-side reporting so the stack auto-emits reports on value
+     * change. Required for the deep-sleep model: z2m cannot poll a sleeping
+     * device, and the explicit report command asserts in this SDK — so the
+     * stack's own reporting engine is the only working push. min_interval=1s,
+     * max_interval=0 (report on change only), with a small reportable delta. */
+    config_reporting(ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT,
+                     ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID, 10);  /* 0.1% */
+    config_reporting(ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+                     ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID, 1);
+    config_reporting(ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+                     ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID, 1);
 
     /* Scan all 2.4 GHz channels (11–26). */
     esp_zb_set_primary_network_channel_set(ESP_ZB_TRANSCEIVER_ALL_CHANNELS_MASK);

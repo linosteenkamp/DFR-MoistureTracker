@@ -446,6 +446,79 @@ platformio run --target size
 platformio run -v
 ```
 
+## Zigbee Build (SP1)
+
+The Zigbee transport is behind the `USE_ZIGBEE` build flag. WiFi/MQTT remains the
+default build. There are three relevant envs:
+
+| Env | Transport | Sleep | Use |
+|-----|-----------|-------|-----|
+| `dfrobot_firebeetle2_esp32c6` | WiFi/MQTT | deep sleep | default, production WiFi |
+| `dfrobot_firebeetle2_esp32c6_zigbee` | Zigbee | managed light sleep | production Zigbee |
+| `dfrobot_firebeetle2_esp32c6_zigbee_test` | Zigbee | none (stays awake) | bench: keeps USB-JTAG up |
+
+The Zigbee envs inject `sdkconfig.defaults.zigbee` via
+`board_build.cmake_extra_args = -DSDKCONFIG_DEFAULTS=...` (the only mechanism that
+works for a pure-espidf build — `board_build.sdkconfig_defaults` and pioarduino's
+`custom_sdkconfig` are no-ops here). This enables the 802.15.4 radio, the Zigbee
+end-device role, 4 MB flash, and the `zb_storage`/`zb_fct` partitions.
+
+### Build & flash the Zigbee firmware
+
+```bash
+# Production (managed light sleep)
+pio run -e dfrobot_firebeetle2_esp32c6_zigbee -t upload -t monitor
+
+# Bench (stays awake, USB-JTAG stays up for re-flashing)
+pio run -e dfrobot_firebeetle2_esp32c6_zigbee_test -t upload -t monitor
+```
+
+### Power model — managed light sleep
+
+The Zigbee build does **not** use ESP deep sleep. `app_main()` brings up the stack,
+joins, then returns; the esp-zigbee task stays alive and uses the SDK's managed
+light-sleep (`esp_zb_sleep_enable`). A scheduler alarm (`periodic_report_cb`)
+re-samples the sensors and pushes attribute updates every `ZIGBEE_REPORT_INTERVAL_SEC`
+(900 s / 15 min). Staying associated avoids the ZigBee end-device aging timeout that
+caused stale readings under full deep sleep + rejoin.
+
+> Why not `esp_zb_zcl_report_attr_cmd_req()`? It asserts in the stack for all
+> clusters (zcl_general_commands.c:612). Reporting is done with
+> `esp_zb_zcl_set_attribute_val()` from the scheduler callback (stack context, so
+> **no** `esp_zb_lock_acquire`) plus device-side reporting config.
+
+### Clusters
+
+| Cluster | ID | Attribute | Carries |
+|---------|-----|-----------|---------|
+| Power Configuration | 0x0001 | 0x0020 BatteryVoltage (100 mV) / 0x0021 BatteryPercentageRemaining (0.5%) | battery |
+| Relative Humidity | 0x0405 | 0x0000 MeasuredValue (0.01%, uint16) | soil moisture |
+
+Soil moisture rides the standard Humidity cluster because the SDK's custom Soil
+Moisture cluster (0x0408) asserts; both use the same 0.01% uint16 wire format.
+
+### Pairing
+
+1. In zigbee2mqtt, enable `permit_join`.
+2. Power-cycle the sensor (or first flash). It auto-runs BDB steering and joins.
+3. Install `z2m/dfr_soil_moisture.js` as an external converter and restart zigbee2mqtt.
+4. The device appears as `DFR-SoilSensor` (vendor `DFRobot-DIY`) with `soil_moisture`
+   and `battery` entities. The modelID matches `zigbeeModel`, so a z2m restart
+   re-applies the converter without re-pairing.
+
+### Verification checklist
+
+- [ ] Device joins and appears in zigbee2mqtt without manual interview errors.
+- [ ] `soil_moisture` tracks reality (low in air, high in water).
+- [ ] `battery` % and voltage are plausible (note: inflated while solar-charging — known limitation).
+- [ ] ≥3 consecutive report cycles without a new join logged (rejoin-free; confirms the device stays associated).
+
+### Known limitations (SP1)
+
+- Battery SoC reads high during daylight solar charging (terminal sits at charger CV voltage).
+- Commissioning is auto-steer-on-boot only; button-driven pairing arrives in SP3.
+- The e-paper is refreshed on the WiFi build; Zigbee-path display refresh is not yet wired.
+
 ## Resources
 
 - [ESP-IDF Documentation](https://docs.espressif.com/projects/esp-idf/en/latest/esp32c6/)

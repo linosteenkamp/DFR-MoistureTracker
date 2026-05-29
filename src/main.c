@@ -470,16 +470,21 @@ static void run_portal_then_sleep(void) {
 #ifdef USE_ZIGBEE
 // --- GPIO7 config-portal entry (Zigbee build) ---------------------------------
 // The Zigbee build runs managed light sleep (CPU mostly halted between radio
-// events), so the deep-sleep GPIO-wake path never runs. Instead GPIO7 is armed
-// as a light-sleep wake source with a falling-edge ISR. A press wakes the CPU,
-// the ISR signals s_config_btn_sem, and config_trigger_task latches the RTC flag
-// and restarts into config mode. esp_restart() is illegal in ISR context, hence
-// the task hop.
+// events), so the deep-sleep GPIO-wake path never runs. GPIO7 is armed as a
+// LOW-LEVEL light-sleep wake source with a LOW-LEVEL interrupt. The trigger must
+// be level- (not edge-) sensitive: the press's falling edge happens while the
+// digital GPIO logic is gated in light sleep, so on wake the pin is already held
+// low and no edge is ever seen — only a level interrupt fires. The ISR disables
+// the interrupt (a held-low level int would otherwise re-fire forever and starve
+// the trigger task) and signals s_config_btn_sem; config_trigger_task debounces,
+// latches the RTC flag, and restarts into config mode. esp_restart() is illegal
+// in ISR context, hence the task hop.
 static SemaphoreHandle_t s_config_btn_sem = NULL;
 
 static void IRAM_ATTR config_btn_isr(void *arg)
 {
     (void)arg;
+    gpio_intr_disable(GPIO_NUM_7);   // level int: stop the storm (re-armed on bounce)
     BaseType_t hp_woken = pdFALSE;
     xSemaphoreGiveFromISR(s_config_btn_sem, &hp_woken);
     if (hp_woken) {
@@ -494,10 +499,11 @@ static void config_trigger_task(void *pv)
         if (xSemaphoreTake(s_config_btn_sem, portMAX_DELAY) != pdTRUE) {
             continue;
         }
-        // Debounce: require the line to still be low ~40 ms after the edge.
+        // Debounce: require the line to still be low ~40 ms after the wake.
         vTaskDelay(pdMS_TO_TICKS(40));
         if (gpio_get_level(GPIO_NUM_7) != 0) {
-            continue;   // bounce/noise — ignore
+            gpio_intr_enable(GPIO_NUM_7);   // bounce/noise — re-arm and wait again
+            continue;
         }
         ESP_LOGI(TAG, "GPIO7 pressed — rebooting into config mode");
         s_config_requested = true;
@@ -519,7 +525,7 @@ static void setup_config_button(void)
         .mode         = GPIO_MODE_INPUT,
         .pull_up_en   = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type    = GPIO_INTR_NEGEDGE,
+        .intr_type    = GPIO_INTR_LOW_LEVEL,   // matches the low-level light-sleep wake
     };
     gpio_config(&btn);
 
@@ -531,7 +537,7 @@ static void setup_config_button(void)
     gpio_isr_handler_add(GPIO_NUM_7, config_btn_isr, NULL);
 
     xTaskCreate(config_trigger_task, "cfg_btn", 3072, NULL, 6, NULL);
-    ESP_LOGI(TAG, "GPIO7 config button armed (light-sleep wake + ISR)");
+    ESP_LOGI(TAG, "GPIO7 config button armed (low-level light-sleep wake + ISR)");
 }
 #endif /* USE_ZIGBEE */
 

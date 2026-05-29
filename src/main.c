@@ -30,6 +30,7 @@
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "esp_system.h"
 #include "esp_log.h"
 #include "esp_sleep.h"
@@ -52,6 +53,9 @@
 #include "display.h"
 #include "mqtt_publisher.h"
 #include "mqtt_credentials.h"  // MQTT broker credentials (not in git)
+#ifdef USE_ZIGBEE
+#include "zigbee_reporter.h"
+#endif
 
 static const char *TAG = "MAIN";
 
@@ -65,6 +69,17 @@ static float g_cached_battery_v = 0.0f;
 // Persists across deep sleep: latches when the low-battery warning has been drawn,
 // so we don't burn ~30 mJ refreshing the e-paper every hour while the cell is starved.
 RTC_DATA_ATTR static bool s_low_battery_shown = false;
+
+// Set by the GPIO7 trigger task before esp_restart(); read once early in
+// app_main() to enter config-portal mode. Must be RTC_NOINIT (not RTC_DATA):
+// esp_restart() is a full SW reset, and startup re-initialises .rtc.data from
+// flash — so an initialised RTC_DATA var would be wiped back to its initializer.
+// .rtc.noinit is never touched by startup, so it survives esp_restart (and deep
+// sleep); only a cold power-on randomises it, hence the magic guard.
+#ifdef USE_ZIGBEE
+#define CONFIG_REQUEST_MAGIC 0xC04F1601u
+RTC_NOINIT_ATTR static uint32_t s_config_request_magic;
+#endif
 
 // ============================================================================
 // Application Configuration
@@ -83,8 +98,12 @@ RTC_DATA_ATTR static bool s_low_battery_shown = false;
 #define DEEP_SLEEP_INTERVAL_SEC  3600                    ///< Deep sleep duration in seconds (3600 = 1 hour)
 #define uS_TO_S_FACTOR          1000000ULL               ///< Conversion factor for microseconds to seconds
 
+#ifdef USE_ZIGBEE
+#define ZIGBEE_REPORT_INTERVAL_SEC  900                  ///< Zigbee managed-sleep report interval (seconds, 15 min)
+#endif
+
 #ifdef DISABLE_DEEP_SLEEP
-#define TEST_PUBLISH_INTERVAL_MS 5000                    ///< Test-mode re-publish cadence
+#define TEST_PUBLISH_INTERVAL_MS 5000                    ///< Test-mode re-publish cadence (WiFi path only)
 #endif
 
 // ============================================================================
@@ -452,6 +471,146 @@ static void run_portal_then_sleep(void) {
 }
 
 // ============================================================================
+// Zigbee Sensor Sampling Callback
+// ============================================================================
+
+#ifdef USE_ZIGBEE
+// --- GPIO7 config-portal entry (Zigbee build) ---------------------------------
+// The Zigbee build runs managed light sleep (CPU mostly halted between radio
+// events), so the deep-sleep GPIO-wake path never runs. GPIO7 is armed as a
+// LOW-LEVEL light-sleep wake source with a LOW-LEVEL interrupt. The trigger must
+// be level- (not edge-) sensitive: the press's falling edge happens while the
+// digital GPIO logic is gated in light sleep, so on wake the pin is already held
+// low and no edge is ever seen — only a level interrupt fires. The ISR disables
+// the interrupt (a held-low level int would otherwise re-fire forever and starve
+// the trigger task) and signals s_config_btn_sem; config_trigger_task debounces,
+// latches the RTC flag, and restarts into config mode. esp_restart() is illegal
+// in ISR context, hence the task hop.
+static SemaphoreHandle_t s_config_btn_sem = NULL;
+
+static void IRAM_ATTR config_btn_isr(void *arg)
+{
+    (void)arg;
+    gpio_intr_disable(GPIO_NUM_7);   // level int: stop the storm (re-armed on bounce)
+    BaseType_t hp_woken = pdFALSE;
+    xSemaphoreGiveFromISR(s_config_btn_sem, &hp_woken);
+    portYIELD_FROM_ISR(hp_woken);
+}
+
+static void config_trigger_task(void *pv)
+{
+    (void)pv;
+    for (;;) {
+        if (xSemaphoreTake(s_config_btn_sem, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        // Debounce: require the line to still be low ~40 ms after the wake.
+        vTaskDelay(pdMS_TO_TICKS(40));
+        if (gpio_get_level(GPIO_NUM_7) != 0) {
+            gpio_intr_enable(GPIO_NUM_7);   // bounce/noise — re-arm and wait again
+            continue;
+        }
+        ESP_LOGI(TAG, "GPIO7 pressed — rebooting into config mode");
+        s_config_request_magic = CONFIG_REQUEST_MAGIC;
+        vTaskDelay(pdMS_TO_TICKS(50));   // let the log flush
+        esp_restart();
+    }
+}
+
+static void setup_config_button(void)
+{
+    s_config_btn_sem = xSemaphoreCreateBinary();
+    if (s_config_btn_sem == NULL) {
+        ESP_LOGW(TAG, "config button sem alloc failed — button disabled");
+        return;
+    }
+
+    gpio_config_t btn = {
+        .pin_bit_mask = (1ULL << GPIO_NUM_7),
+        .mode         = GPIO_MODE_INPUT,
+        .pull_up_en   = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_LOW_LEVEL,   // matches the low-level light-sleep wake
+    };
+    gpio_config(&btn);
+
+    // Wake the CPU out of managed light sleep when GPIO7 goes low.
+    gpio_wakeup_enable(GPIO_NUM_7, GPIO_INTR_LOW_LEVEL);
+    esp_sleep_enable_gpio_wakeup();
+
+    esp_err_t isr_err = gpio_install_isr_service(0);
+    if (isr_err != ESP_OK && isr_err != ESP_ERR_INVALID_STATE) {
+        // INVALID_STATE just means the service was already installed elsewhere.
+        ESP_LOGW(TAG, "gpio isr service install: %s", esp_err_to_name(isr_err));
+    }
+    gpio_isr_handler_add(GPIO_NUM_7, config_btn_isr, NULL);
+
+    xTaskCreate(config_trigger_task, "cfg_btn", 3072, NULL, 6, NULL);
+    ESP_LOGI(TAG, "GPIO7 config button armed (low-level light-sleep wake + ISR)");
+}
+#endif /* USE_ZIGBEE */
+
+#ifdef USE_ZIGBEE
+/* --- Periodic report task ----------------------------------------------------
+ * The Zigbee reporter fires a cheap "tick" in the stack main-loop context on the
+ * report schedule (zb_report_tick). Doing the work there would stall keep-alives
+ * and frame handling — the soil read alone blocks ~150 ms warming the sensor, and
+ * the SSD1680 full refresh ~2 s. So the tick only signals this task, which:
+ *   1. samples every sensor exactly ONCE — a single soil power-up yields both the
+ *      raw mV and the %, so the display and the Zigbee report can't disagree;
+ *   2. pushes the values over Zigbee via the locked zigbee_reporter_report() path;
+ *   3. refreshes the e-paper with that same sample.
+ */
+static SemaphoreHandle_t s_report_sem = NULL;
+
+static void zb_report_tick(void)
+{
+    /* Zigbee stack task context (scheduler alarm) — keep it cheap: just wake the
+     * report task. Not an ISR, so the plain give is correct. */
+    if (s_report_sem) {
+        xSemaphoreGive(s_report_sem);
+    }
+}
+
+static void zb_report_task(void *pv)
+{
+    (void)pv;
+    for (;;) {
+        if (xSemaphoreTake(s_report_sem, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+
+        // One soil power-up: derive both raw mV and % from the same sample, so
+        // the reported value and the displayed value are guaranteed consistent.
+        int   raw_mv      = soil_moisture_read_raw_mv();
+        float soil_pct    = soil_moisture_calc_percentage(
+                                raw_mv,
+                                (int)soil_calibration_get_dry_mv(),
+                                (int)soil_calibration_get_wet_mv());
+        float battery_v   = battery_monitor_read_voltage();
+        float battery_pct = battery_monitor_v_to_pct(battery_v);
+
+        // Push to Zigbee (takes the Zigbee lock — we are not the stack task).
+        zigbee_reporter_report(soil_pct, battery_v, battery_pct);
+
+        // Refresh the e-paper with the SAME sample.
+        display_telemetry_t dt = {
+            .device_id     = device_id_buffer,
+            .moisture_pct  = soil_pct,
+            .raw_mv        = raw_mv,
+            .battery_v     = battery_v,
+            .battery_pct   = (int)(battery_pct + 0.5f),
+            .wifi_rssi_dbm = 0,   // no WiFi in Zigbee mode
+        };
+        if (display_init() == ESP_OK) {
+            display_show_telemetry(&dt);
+            display_deinit();
+        }
+    }
+}
+#endif /* USE_ZIGBEE */
+
+// ============================================================================
 // Application Entry Point
 // ============================================================================
 
@@ -520,11 +679,32 @@ void app_main(void) {
         return;  // Never reached
     }
 
+#ifndef USE_ZIGBEE
     // Portal mode triggers: GPIO wake (button press) or never-provisioned device.
+    // WiFi-build only: the Zigbee build has no WiFi-provisioning concept (commissioning
+    // happens over Zigbee), so it must NOT gate on wifi_credentials_is_provisioned()
+    // or it would enter the SoftAP portal after a flash erase. Button UX is SP3.
     if (wake_cause == ESP_SLEEP_WAKEUP_GPIO || !wifi_credentials_is_provisioned()) {
         run_portal_then_sleep();
         return;
     }
+#endif
+
+#ifdef USE_ZIGBEE
+    // Config-portal mode takes priority over the brownout gate: a deliberate
+    // button press should always reach config (radio is off, so power is modest).
+    // Clear the flag first so a crash mid-portal returns to normal operation.
+    if (s_config_request_magic == CONFIG_REQUEST_MAGIC) {
+        s_config_request_magic = 0;   // clear first so a crash mid-portal returns to normal
+        ESP_LOGI(TAG, "Entering config portal (button-triggered)");
+        if (display_init() == ESP_OK) {
+            display_show_portal();
+            display_deinit();
+        }
+        config_portal_run();   // blocks until a save handler restarts, or idle timeout
+        esp_restart();         // idle-timeout path: reboot back into Zigbee
+    }
+#endif
 
     // ------------------------------------------------------------------
     // Zero-load battery sample: must happen before WiFi/MQTT energize.
@@ -549,28 +729,71 @@ void app_main(void) {
     s_low_battery_shown = false;            // healthy reading clears the latch
     g_cached_battery_v = ocv;               // reused by publish_telemetry_once()
 
+#ifdef USE_ZIGBEE
+    // --- Zigbee transport path: managed light-sleep model ---
+    // device_id_buffer is normally filled by setup_mqtt() (WiFi path), which the
+    // Zigbee path never calls — load it here so the e-paper shows the right ID.
+    if (!wifi_credentials_load_device_id(device_id_buffer, sizeof(device_id_buffer))) {
+        strncpy(device_id_buffer, DEFAULT_DEVICE_ID, sizeof(device_id_buffer) - 1);
+        device_id_buffer[sizeof(device_id_buffer) - 1] = '\0';
+    }
+    setup_config_button();
+    zigbee_reporter_set_location(device_id_buffer);
+
+    // Off-loop report task: the reporter fires a cheap tick on the schedule; the
+    // task samples the sensors, pushes the values over Zigbee, and refreshes the
+    // e-paper — none of which may run in the stack main loop.
+    s_report_sem = xSemaphoreCreateBinary();
+    if (s_report_sem != NULL) {
+        xTaskCreate(zb_report_task, "zb_report", 4096, NULL, 4, NULL);
+        zigbee_reporter_set_report_tick_cb(zb_report_tick);
+    } else {
+        ESP_LOGE(TAG, "Report semaphore alloc failed — periodic reports disabled");
+    }
+
+    zigbee_reporter_set_interval_ms((uint32_t)ZIGBEE_REPORT_INTERVAL_SEC * 1000U);
+
+    if (zigbee_reporter_init() != ESP_OK) {
+        ESP_LOGE(TAG, "Zigbee init failed, sleeping");
+        enter_deep_sleep(DEEP_SLEEP_INTERVAL_SEC);
+        return;
+    }
+
+    if (zigbee_reporter_wait_ready(30000)) {
+        ESP_LOGI(TAG, "Zigbee ready (joined)");
+    } else {
+        ESP_LOGW(TAG, "Zigbee not ready (not joined yet) — stack keeps trying");
+    }
+
+    /* Managed light-sleep: the Zigbee stack task stays alive and pushes periodic
+     * reports via the scheduler (periodic_report_cb). app_main returns here;
+     * the stack continues running in its own FreeRTOS task.
+     * DISABLE_DEEP_SLEEP now only controls whether esp_zb_sleep_enable() is
+     * called inside zigbee_reporter.c — no loop or sleep needed here. */
+    return;
+#else
     // Step 2: Setup WiFi (handles provisioning if needed)
     if (setup_wifi() != ESP_OK) {
         ESP_LOGE(TAG, "WiFi setup failed, entering sleep");
         enter_deep_sleep(DEEP_SLEEP_INTERVAL_SEC);
         return;  // Never reached
     }
-    
+
     // Step 3: Setup MQTT
     if (setup_mqtt() != ESP_OK) {
         ESP_LOGE(TAG, "MQTT setup failed, entering sleep");
         enter_deep_sleep(DEEP_SLEEP_INTERVAL_SEC);
         return;  // Never reached
     }
-    
+
     ESP_LOGI(TAG, "=== Initialization Complete ===");
-    
+
     // Step 4: Publish telemetry once
     esp_err_t err = publish_telemetry_once();
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Telemetry publish failed, but continuing to sleep");
     }
-    
+
 #ifdef DISABLE_DEEP_SLEEP
     ESP_LOGW(TAG, "DISABLE_DEEP_SLEEP set - looping publish every %d ms", TEST_PUBLISH_INTERVAL_MS);
     while (1) {
@@ -583,4 +806,5 @@ void app_main(void) {
 
     // This line is never reached - device enters deep sleep
 #endif
+#endif /* USE_ZIGBEE */
 }

@@ -36,6 +36,33 @@ pio run --target size
 pio run -v
 ```
 
+### Zigbee build
+
+WiFi/MQTT is the default. A Zigbee transport variant lives behind the `USE_ZIGBEE`
+flag (native `esp_zb_*` API, esp-zigbee-lib 1.6.x):
+
+```bash
+# Production Zigbee (managed light sleep, reports every 15 min)
+pio run -e dfrobot_firebeetle2_esp32c6_zigbee -t upload -t monitor
+
+# Bench Zigbee (stays awake, USB-JTAG stays up)
+pio run -e dfrobot_firebeetle2_esp32c6_zigbee_test -t upload -t monitor
+```
+
+The Zigbee env injects `sdkconfig.defaults.zigbee` via `board_build.cmake_extra_args`
+(the only sdkconfig mechanism that works for pure-espidf). It uses **managed light
+sleep**, not ESP deep sleep — `app_main()` joins then returns; the stack task pushes
+periodic reports via a scheduler alarm. Soil rides the standard Humidity cluster
+(0x0405); battery on Power Config (0x0001). See "Zigbee Build (SP1)" in
+`DEVELOPER_GUIDE.md` for the full pairing/verification flow and the z2m converter
+(`z2m/dfr_soil_moisture.js`).
+
+A short press of the GPIO7 button reboots the Zigbee build into the SoftAP config
+portal (calibration + sensor name; no WiFi-station setup), then reboots back into
+Zigbee. The sensor name is stored in NVS (`device_id`), shown on the e-paper, and
+exposed over Zigbee via Basic LocationDescription (0x0010) → surfaced by the z2m
+converter as the `label` MQTT field for Node-RED.
+
 There are no automated tests — validation is manual via serial monitor. See the checklist in `DEVELOPER_GUIDE.md`.
 
 ## Credentials Setup (Required Before First Build)

@@ -1,0 +1,7 @@
+dependencies:
+  # Pin to the 1.6.x line: esp_zb_* is the NATIVE API here (no compat shim),
+  # and it is the matched pair for esp-zboss-lib 1.6.x. The 2.x line moved to a
+  # different native API and pulling "*" mismatched it against zboss 1.6.4,
+  # which aborted in ezb_plat_datasets_init.
+  espressif/esp-zigbee-lib: "~1.6.0"
+  espressif/esp-zboss-lib: "~1.6.0"

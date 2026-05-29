@@ -1,0 +1,17 @@
+# Base console-over-USB (mirrors sdkconfig.defaults)
+CONFIG_NVS_FLASH=y
+CONFIG_ESP_CONSOLE_UART_DEFAULT=n
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# Zigbee end-device on the native 802.15.4 radio
+CONFIG_ZB_ENABLED=y
+CONFIG_ZB_ZED=y
+CONFIG_ZB_RADIO_NATIVE=y
+
+# Flash size (board is 4MB; explicit because this env's sdkconfig_defaults
+# replaces the base defaults and would otherwise fall back to 2MB)
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# Custom partition table (adds zb_storage / zb_fct)
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"

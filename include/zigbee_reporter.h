@@ -5,23 +5,17 @@
 #include <stdint.h>
 #include "esp_err.h"
 
-/* Fills the three values with a fresh sensor sample. Called from the Zigbee
- * stack context on the report schedule. */
-typedef void (*zigbee_sample_cb_t)(float *soil_pct, float *battery_v, float *battery_pct);
+/* Invoked from the Zigbee stack context on the periodic report schedule. Keep it
+ * cheap and non-blocking — it runs in the stack main loop, so any slow work
+ * (sampling the sensors, an e-paper refresh) MUST be deferred to its own task.
+ * That task should sample, push the values via zigbee_reporter_report(), then
+ * refresh the display. */
+typedef void (*zigbee_report_tick_cb_t)(void);
 
-/* Invoked from the Zigbee stack context after each periodic report, with the
- * values that were just published. Keep the handler cheap and non-blocking —
- * any slow work (e.g. an e-paper refresh) must be deferred to its own task so it
- * does not stall the stack main loop. */
-typedef void (*zigbee_report_done_cb_t)(float soil_pct, float battery_v, float battery_pct);
-
-/* Register the sampling callback and the report interval (milliseconds).
- * Must be called before zigbee_reporter_init(). */
-void zigbee_reporter_set_sample_cb(zigbee_sample_cb_t cb);
+/* Register the periodic report-tick callback and the report interval (ms).
+ * Both must be called before zigbee_reporter_init(). */
+void zigbee_reporter_set_report_tick_cb(zigbee_report_tick_cb_t cb);
 void zigbee_reporter_set_interval_ms(uint32_t interval_ms);
-
-/* Optional: register a handler invoked after each periodic report. */
-void zigbee_reporter_set_report_done_cb(zigbee_report_done_cb_t cb);
 
 /* Set the Basic-cluster LocationDescription (0x0010) string, surfaced by the
  * z2m converter as the `label` payload field. Must be called before

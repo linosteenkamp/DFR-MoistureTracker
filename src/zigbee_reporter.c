@@ -57,8 +57,7 @@ static const char *TAG = "ZB_RPT";
 static volatile bool s_joined = false;
 
 /* Managed-sleep / periodic-report state. */
-static zigbee_sample_cb_t      s_sample_cb        = NULL;
-static zigbee_report_done_cb_t s_report_done_cb   = NULL;
+static zigbee_report_tick_cb_t s_report_tick_cb     = NULL;
 static uint32_t                s_report_interval_ms = 900000U; /* 15 min default */
 
 /* Basic cluster LocationDescription (0x0010): ZCL character string —
@@ -66,19 +65,14 @@ static uint32_t                s_report_interval_ms = 900000U; /* 15 min default
  * zigbee_reporter_set_location() before the cluster is created. */
 static char s_location_zcl[1 + 16 + 1] = {0};
 
-void zigbee_reporter_set_sample_cb(zigbee_sample_cb_t cb)
+void zigbee_reporter_set_report_tick_cb(zigbee_report_tick_cb_t cb)
 {
-    s_sample_cb = cb;
+    s_report_tick_cb = cb;
 }
 
 void zigbee_reporter_set_interval_ms(uint32_t interval_ms)
 {
     s_report_interval_ms = interval_ms;
-}
-
-void zigbee_reporter_set_report_done_cb(zigbee_report_done_cb_t cb)
-{
-    s_report_done_cb = cb;
 }
 
 void zigbee_reporter_set_location(const char *name)
@@ -194,13 +188,13 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
 }
 
 /* ============================================================
- * No-lock attribute update helper (call ONLY from stack task context)
+ * No-lock attribute update helper (caller must already hold the Zigbee lock)
  * ============================================================ */
 
-/* Update the three ZCL attributes WITHOUT taking the Zigbee lock.
- * This must only be called from within the Zigbee stack task context
- * (e.g. from a scheduler alarm callback), where the lock is already
- * held implicitly. Taking the lock here would deadlock. */
+/* Update the three ZCL attributes WITHOUT taking the Zigbee lock. The caller
+ * must already hold it — either by running in the Zigbee stack task context, or
+ * by wrapping the call in esp_zb_lock_acquire()/release() (see
+ * zigbee_reporter_report()). Taking the lock here would deadlock the former. */
 static void update_attributes_no_lock(float soil_pct, float battery_v, float battery_pct)
 {
     uint16_t soil = zigbee_encode_soil_pct(soil_pct);
@@ -240,19 +234,14 @@ static void update_attributes_no_lock(float soil_pct, float battery_v, float bat
 static void periodic_report_cb(uint8_t param)
 {
     (void)param;
-    if (s_sample_cb) {
-        float soil = 0.0f, bv = 0.0f, bp = 0.0f;
-        s_sample_cb(&soil, &bv, &bp);
-        /* No-lock update: we are already in the Zigbee stack context. */
-        update_attributes_no_lock(soil, bv, bp);
-        ESP_LOGI(TAG, "periodic report: soil=%.1f%% batt=%.2fV (%.0f%%)", soil, bv, bp);
-        if (s_report_done_cb) {
-            /* Handler must be cheap (it runs in the stack loop); it defers the
-             * actual e-paper refresh to its own task. */
-            s_report_done_cb(soil, bv, bp);
-        }
+    /* Runs in the Zigbee stack task context — must stay cheap. Hand the actual
+     * sample + report + e-paper work to the app task: doing the ~150 ms soil read
+     * (or the ~2 s display refresh) here would stall keep-alives and frame
+     * handling. The task pushes its sample back via zigbee_reporter_report(). */
+    if (s_report_tick_cb) {
+        s_report_tick_cb();
     } else {
-        ESP_LOGW(TAG, "periodic_report_cb: no sample callback registered");
+        ESP_LOGW(TAG, "periodic_report_cb: no report-tick callback registered");
     }
     /* Re-arm the alarm for the next cycle. */
     esp_zb_scheduler_alarm(periodic_report_cb, 0, s_report_interval_ms);

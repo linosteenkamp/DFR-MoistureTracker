@@ -551,53 +551,55 @@ static void setup_config_button(void)
 #endif /* USE_ZIGBEE */
 
 #ifdef USE_ZIGBEE
-/**
- * @brief Sample all sensors and return their values.
- *
- * Called from the Zigbee stack scheduler context (periodic_report_cb).
- * Reads the battery voltage and soil moisture and converts to the three
- * values the Zigbee reporter needs.
+/* --- Periodic report task ----------------------------------------------------
+ * The Zigbee reporter fires a cheap "tick" in the stack main-loop context on the
+ * report schedule (zb_report_tick). Doing the work there would stall keep-alives
+ * and frame handling — the soil read alone blocks ~150 ms warming the sensor, and
+ * the SSD1680 full refresh ~2 s. So the tick only signals this task, which:
+ *   1. samples every sensor exactly ONCE — a single soil power-up yields both the
+ *      raw mV and the %, so the display and the Zigbee report can't disagree;
+ *   2. pushes the values over Zigbee via the locked zigbee_reporter_report() path;
+ *   3. refreshes the e-paper with that same sample.
  */
-static void zb_sample_sensors(float *soil_pct, float *battery_v, float *battery_pct)
-{
-    *battery_v   = battery_monitor_read_voltage();
-    *soil_pct    = soil_moisture_read_percentage();
-    *battery_pct = battery_monitor_v_to_pct(*battery_v);
-}
+static SemaphoreHandle_t s_report_sem = NULL;
 
-/* --- Deferred e-paper refresh ------------------------------------------------
- * The Zigbee report-done callback runs in the stack main-loop context, where a
- * ~2 s blocking SSD1680 full refresh would stall keep-alives and frame handling.
- * So the callback only latches the latest values and signals a dedicated task,
- * which owns the slow SPI work off the stack loop. */
-static SemaphoreHandle_t s_display_sem  = NULL;
-static volatile float    s_disp_soil    = 0.0f;
-static volatile float    s_disp_batt_v  = 0.0f;
-static volatile int      s_disp_batt_pct = 0;
-
-static void zb_report_done(float soil_pct, float battery_v, float battery_pct)
+static void zb_report_tick(void)
 {
-    s_disp_soil     = soil_pct;
-    s_disp_batt_v   = battery_v;
-    s_disp_batt_pct = (int)(battery_pct + 0.5f);
-    if (s_display_sem) {
-        xSemaphoreGive(s_display_sem);
+    /* Zigbee stack task context (scheduler alarm) — keep it cheap: just wake the
+     * report task. Not an ISR, so the plain give is correct. */
+    if (s_report_sem) {
+        xSemaphoreGive(s_report_sem);
     }
 }
 
-static void zb_display_task(void *pv)
+static void zb_report_task(void *pv)
 {
     (void)pv;
     for (;;) {
-        if (xSemaphoreTake(s_display_sem, portMAX_DELAY) != pdTRUE) {
+        if (xSemaphoreTake(s_report_sem, portMAX_DELAY) != pdTRUE) {
             continue;
         }
+
+        // One soil power-up: derive both raw mV and % from the same sample, so
+        // the reported value and the displayed value are guaranteed consistent.
+        int   raw_mv      = soil_moisture_read_raw_mv();
+        float soil_pct    = soil_moisture_calc_percentage(
+                                raw_mv,
+                                (int)soil_calibration_get_dry_mv(),
+                                (int)soil_calibration_get_wet_mv());
+        float battery_v   = battery_monitor_read_voltage();
+        float battery_pct = battery_monitor_v_to_pct(battery_v);
+
+        // Push to Zigbee (takes the Zigbee lock — we are not the stack task).
+        zigbee_reporter_report(soil_pct, battery_v, battery_pct);
+
+        // Refresh the e-paper with the SAME sample.
         display_telemetry_t dt = {
             .device_id     = device_id_buffer,
-            .moisture_pct  = s_disp_soil,
-            .raw_mv        = soil_moisture_read_raw_mv(),
-            .battery_v     = s_disp_batt_v,
-            .battery_pct   = s_disp_batt_pct,
+            .moisture_pct  = soil_pct,
+            .raw_mv        = raw_mv,
+            .battery_v     = battery_v,
+            .battery_pct   = (int)(battery_pct + 0.5f),
             .wifi_rssi_dbm = 0,   // no WiFi in Zigbee mode
         };
         if (display_init() == ESP_OK) {
@@ -738,17 +740,17 @@ void app_main(void) {
     setup_config_button();
     zigbee_reporter_set_location(device_id_buffer);
 
-    // Start the deferred e-paper refresh task and have the reporter signal it
-    // after each periodic report.
-    s_display_sem = xSemaphoreCreateBinary();
-    if (s_display_sem != NULL) {
-        xTaskCreate(zb_display_task, "zb_display", 4096, NULL, 4, NULL);
-        zigbee_reporter_set_report_done_cb(zb_report_done);
+    // Off-loop report task: the reporter fires a cheap tick on the schedule; the
+    // task samples the sensors, pushes the values over Zigbee, and refreshes the
+    // e-paper — none of which may run in the stack main loop.
+    s_report_sem = xSemaphoreCreateBinary();
+    if (s_report_sem != NULL) {
+        xTaskCreate(zb_report_task, "zb_report", 4096, NULL, 4, NULL);
+        zigbee_reporter_set_report_tick_cb(zb_report_tick);
     } else {
-        ESP_LOGW(TAG, "Display semaphore alloc failed — e-paper refresh disabled");
+        ESP_LOGE(TAG, "Report semaphore alloc failed — periodic reports disabled");
     }
 
-    zigbee_reporter_set_sample_cb(zb_sample_sensors);
     zigbee_reporter_set_interval_ms((uint32_t)ZIGBEE_REPORT_INTERVAL_SEC * 1000U);
 
     if (zigbee_reporter_init() != ESP_OK) {

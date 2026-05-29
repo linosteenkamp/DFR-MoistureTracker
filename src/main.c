@@ -71,8 +71,13 @@ static float g_cached_battery_v = 0.0f;
 RTC_DATA_ATTR static bool s_low_battery_shown = false;
 
 // Set by the GPIO7 trigger task before esp_restart(); read once early in
-// app_main() to enter config-portal mode. RTC memory survives the soft reset.
-RTC_DATA_ATTR static bool s_config_requested = false;
+// app_main() to enter config-portal mode. Must be RTC_NOINIT (not RTC_DATA):
+// esp_restart() is a full SW reset, and startup re-initialises .rtc.data from
+// flash — so an initialised RTC_DATA var would be wiped back to its initializer.
+// .rtc.noinit is never touched by startup, so it survives esp_restart (and deep
+// sleep); only a cold power-on randomises it, hence the magic guard.
+#define CONFIG_REQUEST_MAGIC 0xC04F1601u
+RTC_NOINIT_ATTR static uint32_t s_config_request_magic;
 
 // ============================================================================
 // Application Configuration
@@ -506,7 +511,7 @@ static void config_trigger_task(void *pv)
             continue;
         }
         ESP_LOGI(TAG, "GPIO7 pressed — rebooting into config mode");
-        s_config_requested = true;
+        s_config_request_magic = CONFIG_REQUEST_MAGIC;
         vTaskDelay(pdMS_TO_TICKS(50));   // let the log flush
         esp_restart();
     }
@@ -683,8 +688,8 @@ void app_main(void) {
     // Config-portal mode takes priority over the brownout gate: a deliberate
     // button press should always reach config (radio is off, so power is modest).
     // Clear the flag first so a crash mid-portal returns to normal operation.
-    if (s_config_requested) {
-        s_config_requested = false;
+    if (s_config_request_magic == CONFIG_REQUEST_MAGIC) {
+        s_config_request_magic = 0;   // clear first so a crash mid-portal returns to normal
         ESP_LOGI(TAG, "Entering config portal (button-triggered)");
         if (display_init() == ESP_OK) {
             display_show_portal();

@@ -23,6 +23,12 @@ void zigbee_reporter_set_interval_ms(uint32_t interval_ms);
 /* Optional: register a handler invoked after each periodic report. */
 void zigbee_reporter_set_report_done_cb(zigbee_report_done_cb_t cb);
 
+/* Set the Basic-cluster LocationDescription (0x0010) string, surfaced by the
+ * z2m converter as the `label` payload field. Must be called before
+ * zigbee_reporter_init() (the value is read when the cluster is created). Names
+ * longer than 16 chars are truncated (ZCL char-string limit for this attr). */
+void zigbee_reporter_set_location(const char *name);
+
 /* Start the Zigbee stack as an end-device.
  * Restores persisted network state if already joined, otherwise begins BDB
  * steering (auto-join into any network with permit-join open).

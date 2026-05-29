@@ -61,6 +61,11 @@ static zigbee_sample_cb_t      s_sample_cb        = NULL;
 static zigbee_report_done_cb_t s_report_done_cb   = NULL;
 static uint32_t                s_report_interval_ms = 900000U; /* 15 min default */
 
+/* Basic cluster LocationDescription (0x0010): ZCL character string —
+ * byte 0 is the length, followed by up to 16 chars. Set via
+ * zigbee_reporter_set_location() before the cluster is created. */
+static char s_location_zcl[1 + 16 + 1] = {0};
+
 void zigbee_reporter_set_sample_cb(zigbee_sample_cb_t cb)
 {
     s_sample_cb = cb;
@@ -74,6 +79,17 @@ void zigbee_reporter_set_interval_ms(uint32_t interval_ms)
 void zigbee_reporter_set_report_done_cb(zigbee_report_done_cb_t cb)
 {
     s_report_done_cb = cb;
+}
+
+void zigbee_reporter_set_location(const char *name)
+{
+    size_t n = name ? strlen(name) : 0;
+    if (n > 16) {
+        n = 16;
+    }
+    s_location_zcl[0] = (char)(uint8_t)n;          /* ZCL length prefix */
+    memcpy(&s_location_zcl[1], name ? name : "", n);
+    s_location_zcl[1 + n] = '\0';
 }
 
 /* Forward declaration — periodic_report_cb is defined later in the file but
@@ -312,6 +328,13 @@ static void esp_zb_task(void *pv)
     esp_zb_basic_cluster_add_attr(basic_attrs,
                                   ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID,
                                   (void *)MODEL_ID);
+
+    /* LocationDescription (0x0010) — device-set sensor name, surfaced by the
+     * z2m converter as `label`. Standard Basic attr (custom clusters assert in
+     * this SDK). Value was populated by zigbee_reporter_set_location(). */
+    esp_zb_basic_cluster_add_attr(basic_attrs,
+                                  ESP_ZB_ZCL_ATTR_BASIC_LOCATION_DESCRIPTION_ID,
+                                  (void *)s_location_zcl);
 
     /* ---- Identify cluster ---- */
     esp_zb_identify_cluster_cfg_t identify_cfg = { .identify_time = 0 };

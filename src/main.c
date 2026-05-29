@@ -717,6 +717,7 @@ void app_main(void) {
         device_id_buffer[sizeof(device_id_buffer) - 1] = '\0';
     }
     setup_config_button();
+    zigbee_reporter_set_location(device_id_buffer);
 
     // Start the deferred e-paper refresh task and have the reporter signal it
     // after each periodic report.

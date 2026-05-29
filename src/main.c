@@ -76,8 +76,10 @@ RTC_DATA_ATTR static bool s_low_battery_shown = false;
 // flash — so an initialised RTC_DATA var would be wiped back to its initializer.
 // .rtc.noinit is never touched by startup, so it survives esp_restart (and deep
 // sleep); only a cold power-on randomises it, hence the magic guard.
+#ifdef USE_ZIGBEE
 #define CONFIG_REQUEST_MAGIC 0xC04F1601u
 RTC_NOINIT_ATTR static uint32_t s_config_request_magic;
+#endif
 
 // ============================================================================
 // Application Configuration
@@ -492,9 +494,7 @@ static void IRAM_ATTR config_btn_isr(void *arg)
     gpio_intr_disable(GPIO_NUM_7);   // level int: stop the storm (re-armed on bounce)
     BaseType_t hp_woken = pdFALSE;
     xSemaphoreGiveFromISR(s_config_btn_sem, &hp_woken);
-    if (hp_woken) {
-        portYIELD_FROM_ISR();
-    }
+    portYIELD_FROM_ISR(hp_woken);
 }
 
 static void config_trigger_task(void *pv)
@@ -538,7 +538,11 @@ static void setup_config_button(void)
     gpio_wakeup_enable(GPIO_NUM_7, GPIO_INTR_LOW_LEVEL);
     esp_sleep_enable_gpio_wakeup();
 
-    gpio_install_isr_service(0);
+    esp_err_t isr_err = gpio_install_isr_service(0);
+    if (isr_err != ESP_OK && isr_err != ESP_ERR_INVALID_STATE) {
+        // INVALID_STATE just means the service was already installed elsewhere.
+        ESP_LOGW(TAG, "gpio isr service install: %s", esp_err_to_name(isr_err));
+    }
     gpio_isr_handler_add(GPIO_NUM_7, config_btn_isr, NULL);
 
     xTaskCreate(config_trigger_task, "cfg_btn", 3072, NULL, 6, NULL);

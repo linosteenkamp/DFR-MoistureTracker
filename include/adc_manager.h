@@ -40,4 +40,16 @@ adc_cali_handle_t adc_manager_get_cali_handle(adc_channel_t channel, adc_atten_t
  */
 esp_err_t adc_manager_create_cali(adc_channel_t channel, adc_atten_t atten, adc_cali_handle_t *cali_handle);
 
+/**
+ * @brief Tear down and rebuild the shared ADC unit and all calibration schemes.
+ *
+ * The ADC1 analog/pad state for the soil channel does not survive ESP32-C6 light
+ * sleep (reads rail to >4000 mV); only a complete unit recreate recovers it.
+ * After calling this, every sensor must re-establish its channel + calibration
+ * via its *_reconfigure() helper, since the old handles are now invalid.
+ *
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t adc_manager_reinit(void);
+
 #endif // ADC_MANAGER_H

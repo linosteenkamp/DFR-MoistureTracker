@@ -19,6 +19,16 @@
 esp_err_t battery_monitor_init(void);
 
 /**
+ * @brief Re-establish the ADC channel + calibration after an adc_manager_reinit().
+ *
+ * The shared-unit rebuild invalidates this module's calibration handle; call
+ * this afterward to refresh the channel config + cal on the new unit.
+ *
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t battery_monitor_reconfigure(void);
+
+/**
  * @brief Read current battery voltage
  * @return Battery voltage in volts
  */

@@ -110,6 +110,21 @@ esp_err_t battery_monitor_init(void) {
     return ESP_OK;
 }
 
+esp_err_t battery_monitor_reconfigure(void) {
+    adc_oneshot_unit_handle_t adc_handle = adc_manager_get_handle();
+    if (!adc_handle) {
+        ESP_LOGE(TAG, "reconfigure: ADC handle not available");
+        return ESP_ERR_INVALID_STATE;
+    }
+    adc_oneshot_chan_cfg_t config = { .atten = ADC_ATTEN, .bitwidth = ADC_BITWIDTH_DEFAULT };
+    esp_err_t err = adc_oneshot_config_channel(adc_handle, BAT_ADC_CHAN, &config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "reconfigure: channel config failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    return adc_manager_create_cali(BAT_ADC_CHAN, ADC_ATTEN, &cali_handle);
+}
+
 float battery_monitor_read_voltage(void) {
     if (!initialized) {
         ESP_LOGE(TAG, "Battery monitor not initialized");

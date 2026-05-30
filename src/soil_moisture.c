@@ -38,6 +38,7 @@
 #include "esp_adc/adc_oneshot.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_log.h"
+#include "esp_pm.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -74,6 +75,13 @@ static const char *TAG = "SOIL_MOISTURE";
 // Static module state
 static adc_cali_handle_t cali_handle = NULL;  ///< ADC calibration handle from adc_manager
 static bool initialized = false;              ///< Initialization flag
+
+// Held across each read to block automatic light sleep. Without it, the Zigbee
+// build's tickless light sleep fires during the 150 ms warmup vTaskDelay and the
+// GPIO3 switched-power pin stops driving (a plain digital GPIO does not retain its
+// level through C6 light sleep), so the sensor is unpowered when we sample → 0.0.
+// NULL on the WiFi build (PM disabled): create returns an error and reads run as before.
+static esp_pm_lock_handle_t s_no_light_sleep_lock = NULL;
 
 // ============================================================================
 // Initialization
@@ -127,6 +135,18 @@ esp_err_t soil_moisture_init(void) {
     }
     gpio_set_level(SOIL_PWR_GPIO, 0);
 
+    // Keep the soil pins in their ACTIVE config through automatic light sleep.
+    // By default SLP_SEL is enabled, so the C6 swaps these pads to a sleep-mode
+    // config during light sleep; the power pin (GPIO3) then stops driving and the
+    // next read sees an unpowered sensor (AOUT floats high → "dry"/0%) — which is
+    // exactly the "0.0 after the first read" symptom on the Zigbee build. Disabling
+    // SLP_SEL pins the active config across sleep. No-op on the WiFi build (never
+    // light-sleeps). This is the real fix; the read-time PM lock guarded the wrong
+    // window (corruption happens during idle sleep BETWEEN reads, not during one).
+    gpio_sleep_sel_dis(SOIL_PWR_GPIO);   // GPIO3 — switched VCC (output)
+    // NOTE: do NOT touch sleep-sel on GPIO2 — it is an analog ADC input; forcing
+    // a digital sleep config on it produces over-range garbage conversions.
+
     // Get shared ADC handle
     adc_oneshot_unit_handle_t adc_handle = adc_manager_get_handle();
     if (!adc_handle) {
@@ -153,6 +173,17 @@ esp_err_t soil_moisture_init(void) {
         return err;
     }
 
+    // Create the no-light-sleep lock used during reads. On the WiFi build (PM
+    // disabled) this returns ESP_ERR_NOT_SUPPORTED; we null the handle and the
+    // read path simply skips acquire/release.
+    esp_err_t lk = esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "soil_rd",
+                                      &s_no_light_sleep_lock);
+    if (lk != ESP_OK) {
+        s_no_light_sleep_lock = NULL;
+        ESP_LOGD(TAG, "No-light-sleep lock unavailable (%s) — reads run unguarded",
+                 esp_err_to_name(lk));
+    }
+
     initialized = true;
     ESP_LOGI(TAG, "Soil moisture sensor initialized on ADC1 Channel %d", SOIL_ADC_CHAN);
     ESP_LOGI(TAG, "Calibration (runtime): Dry=%u mV, Wet=%u mV",
@@ -160,6 +191,22 @@ esp_err_t soil_moisture_init(void) {
              (unsigned)soil_calibration_get_wet_mv());
     
     return ESP_OK;
+}
+
+esp_err_t soil_moisture_reconfigure(void) {
+    adc_oneshot_unit_handle_t adc_handle = adc_manager_get_handle();
+    if (!adc_handle) {
+        ESP_LOGE(TAG, "reconfigure: ADC handle not available");
+        return ESP_ERR_INVALID_STATE;
+    }
+    adc_oneshot_chan_cfg_t config = { .atten = ADC_ATTEN, .bitwidth = ADC_BITWIDTH_DEFAULT };
+    esp_err_t err = adc_oneshot_config_channel(adc_handle, SOIL_ADC_CHAN, &config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "reconfigure: channel config failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    // Refresh the calibration handle against the rebuilt unit.
+    return adc_manager_create_cali(SOIL_ADC_CHAN, ADC_ATTEN, &cali_handle);
 }
 
 // ============================================================================
@@ -177,6 +224,12 @@ static int sample_raw_mv(void) {
         ESP_LOGE(TAG, "ADC handle not available");
         return -1;
     }
+    // Block light sleep for the whole powered window: otherwise the CPU sleeps
+    // during the warmup delay and GPIO3 stops driving, unpowering the sensor.
+    if (s_no_light_sleep_lock) {
+        esp_pm_lock_acquire(s_no_light_sleep_lock);
+    }
+
     gpio_set_level(SOIL_PWR_GPIO, 1);
     vTaskDelay(pdMS_TO_TICKS(SOIL_WARMUP_MS));
 
@@ -189,6 +242,11 @@ static int sample_raw_mv(void) {
         }
     }
     gpio_set_level(SOIL_PWR_GPIO, 0);
+
+    // Sensor is off again; the cali math below needs no sleep protection.
+    if (s_no_light_sleep_lock) {
+        esp_pm_lock_release(s_no_light_sleep_lock);
+    }
     if (n == 0) return -1;
 
     int mv = 0;

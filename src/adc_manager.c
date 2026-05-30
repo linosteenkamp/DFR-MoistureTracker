@@ -112,6 +112,28 @@ adc_oneshot_unit_handle_t adc_manager_get_handle(void) {
     return adc_handle;
 }
 
+esp_err_t adc_manager_reinit(void) {
+    ESP_LOGD(TAG, "Rebuilding ADC unit (post-light-sleep recovery)");
+
+    // Drop all calibration schemes so they are recreated against the new unit.
+    for (int i = 0; i < MAX_CALI_HANDLES; i++) {
+        if (cali_handles[i].in_use) {
+            adc_cali_delete_scheme_curve_fitting(cali_handles[i].handle);
+            cali_handles[i].handle = NULL;
+            cali_handles[i].in_use = false;
+        }
+    }
+
+    // Delete the unit so the next init recreates the SAR/analog state from scratch.
+    if (adc_handle) {
+        adc_oneshot_del_unit(adc_handle);
+        adc_handle = NULL;
+    }
+
+    initialized = false;
+    return adc_manager_init();
+}
+
 /**
  * @brief Get existing calibration handle for channel/attenuation pair
  * 

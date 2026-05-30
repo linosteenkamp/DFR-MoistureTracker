@@ -580,6 +580,17 @@ static void zb_report_task(void *pv)
             continue;
         }
 
+        // The soil ADC channel's analog state does not survive C6 light sleep
+        // (post-sleep reads rail to >4000 mV → 0%), and re-priming the channel
+        // alone doesn't recover it. Fully rebuild the shared ADC unit each cycle
+        // and re-establish both sensors on the fresh handle before sampling.
+        if (adc_manager_reinit() == ESP_OK) {
+            soil_moisture_reconfigure();
+            battery_monitor_reconfigure();
+        } else {
+            ESP_LOGE(TAG, "ADC reinit failed — readings may be invalid this cycle");
+        }
+
         // One soil power-up: derive both raw mV and % from the same sample, so
         // the reported value and the displayed value are guaranteed consistent.
         int   raw_mv      = soil_moisture_read_raw_mv();

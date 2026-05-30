@@ -29,6 +29,17 @@
 esp_err_t soil_moisture_init(void);
 
 /**
+ * @brief Re-establish the ADC channel + calibration after an adc_manager_reinit().
+ *
+ * Cheaper than a full re-init: re-applies only the unit-dependent state (channel
+ * config + calibration handle), leaving the GPIO power-pin config and PM lock in
+ * place. Call after adc_manager_reinit() rebuilds the shared unit.
+ *
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t soil_moisture_reconfigure(void);
+
+/**
  * @brief Read current soil moisture level as percentage
  * 
  * Reads the analog sensor value, applies calibration,

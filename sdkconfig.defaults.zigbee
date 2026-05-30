@@ -8,6 +8,17 @@ CONFIG_ZB_ENABLED=y
 CONFIG_ZB_ZED=y
 CONFIG_ZB_RADIO_NATIVE=y
 
+# Power management — REQUIRED for esp_zb_sleep_now() to actually light-sleep.
+# Without these two, esp_zb_sleep_enable(true) only *permits* sleep; the CPU
+# stays at full clock and the radio stays on (~100 mA continuous → ~12 h on a
+# 1200 mAh cell). esp_pm_configure(light_sleep_enable=true) is called from the
+# Zigbee signal handler ONLY after a successful join — enabling it during the
+# BDB steering scan starves the IDLE task and trips the Task WDT (see PR #2).
+CONFIG_PM_ENABLE=y
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
+# Power the MAC+baseband down during light sleep (radio off between parent polls).
+CONFIG_ESP_PHY_MAC_BB_PD=y
+
 # Flash size (board is 4MB; explicit because this env's sdkconfig_defaults
 # replaces the base defaults and would otherwise fall back to 2MB)
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y

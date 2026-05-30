@@ -46,6 +46,7 @@
 #include "zcl/esp_zigbee_zcl_command.h"  /* esp_zb_zcl_report_attr_cmd_t, esp_zb_zcl_report_attr_cmd_req */
 
 #include "esp_log.h"
+#include "esp_pm.h"               /* esp_pm_config_t, esp_pm_configure */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "aps/esp_zigbee_aps.h"  /* ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT */
@@ -98,6 +99,44 @@ static void steering_alarm_cb(uint8_t mode)
     esp_zb_bdb_start_top_level_commissioning((esp_zb_bdb_commissioning_mode_mask_t)mode);
 }
 
+/* Arm automatic light sleep — call ONCE, only after a successful join.
+ *
+ * esp_pm_configure(light_sleep_enable=true) lets the FreeRTOS tickless idle task
+ * drop the SoC into light sleep whenever it is idle. Doing this during the BDB
+ * steering scan suspends the CPU mid-scan, esp_zb_task busy-loops to recover, the
+ * IDLE task starves, and the Task WDT fires every 5 s (this is exactly what sank
+ * PR #2). Deferring it until after join keeps commissioning at full clock and only
+ * starts saving power once the device is operational.
+ *
+ * max_freq == min_freq disables DFS (matches Espressif's sleepy_end_device example);
+ * we only want light sleep, not dynamic frequency scaling. Skipped entirely in the
+ * bench build (DISABLE_DEEP_SLEEP) so the USB-Serial-JTAG link stays up. */
+static void zb_arm_light_sleep(void)
+{
+#ifndef DISABLE_DEEP_SLEEP
+    static bool s_armed = false;
+    if (s_armed) {
+        return;   /* idempotent — rejoin/reboot signals can fire more than once */
+    }
+
+    esp_pm_config_t pm = {
+        .max_freq_mhz       = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
+        .min_freq_mhz       = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
+        .light_sleep_enable = true,
+    };
+    esp_err_t err = esp_pm_configure(&pm);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_pm_configure failed: %s — staying awake", esp_err_to_name(err));
+        return;
+    }
+
+    esp_zb_sleep_enable(true);   /* permit the Zigbee stack to sleep when idle */
+    s_armed = true;
+    ESP_LOGI(TAG, "Light sleep armed (post-join) — CPU %d MHz, radio sleeps between polls",
+             CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
+#endif
+}
+
 #define APP_ENDPOINT  1U
 
 /* ZCL strings are length-prefixed: first byte = character count, then ASCII data. */
@@ -148,6 +187,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                 ESP_LOGI(TAG, "Rebooted onto existing network, short addr 0x%04hx",
                          esp_zb_get_short_address());
                 s_joined = true;
+                zb_arm_light_sleep();   /* safe now — commissioning is done */
                 /* Schedule the first periodic report ~1 s after rejoin. */
                 esp_zb_scheduler_alarm(periodic_report_cb, 0, 1000U);
             }
@@ -163,6 +203,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
             ESP_LOGI(TAG, "BDB steering complete — joined network, short addr 0x%04hx",
                      esp_zb_get_short_address());
             s_joined = true;
+            zb_arm_light_sleep();   /* safe now — steering scan is done */
             /* Schedule the first periodic report ~1 s after fresh join. */
             esp_zb_scheduler_alarm(periodic_report_cb, 0, 1000U);
         } else {
@@ -289,18 +330,26 @@ static void esp_zb_task(void *pv)
         .install_code_policy = false,
         .nwk_cfg.zed_cfg = {
             .ed_timeout  = ESP_ZB_ED_AGING_TIMEOUT_64MIN,
-            .keep_alive  = 3000U,   /* ms between keep-alive polls to parent */
+            .keep_alive  = 15000U,  /* ms between keep-alive polls to parent — longer
+                                     * poll = radio wakes less often = lower average
+                                     * current. Also the max latency for a queued
+                                     * downlink to reach this sleepy ED. */
         },
     };
     esp_zb_init(&zb_cfg);
 
-    /* Keep the receiver on when idle so the coordinator can reliably interview
-     * the device (ZDO Active_EP_req etc.) and reach it during its awake window.
-     * A pure sleepy ED (rx-off) makes z2m's interview time out with
-     * "can not get active endpoints". Power cost is bounded because the deep-sleep
-     * model (Task 6) powers the radio down entirely between wakes; rx-on only
-     * applies while the device is already awake. */
-    esp_zb_set_rx_on_when_idle(true);
+    /* True sleepy end-device: receiver OFF when idle. The radio powers down between
+     * keep-alive polls to the parent, which is where the battery savings come from —
+     * rx-on kept the receiver energized continuously (~100 mA). The parent buffers
+     * any downlinks (z2m Dev-console reads, attribute writes, identify) and delivers
+     * them on the next poll, so they now land within one keep-alive interval instead
+     * of instantly. Periodic sensor reports we push UPWARD are unaffected.
+     *
+     * NOTE: changing rx-on/keep-alive changes the device's advertised MAC capability,
+     * so the parent's stored child record no longer matches a previously-paired device
+     * (manifests as "REBOOT: status -1" loops). Flashing this build requires a one-time
+     * `pio run -t erase` + fresh z2m pair. */
+    esp_zb_set_rx_on_when_idle(false);
 
     /* ---- Basic cluster ---- */
     esp_zb_basic_cluster_cfg_t basic_cfg = {
@@ -395,11 +444,12 @@ static void esp_zb_task(void *pv)
     /* Scan all 2.4 GHz channels (11–26). */
     esp_zb_set_primary_network_channel_set(ESP_ZB_TRANSCEIVER_ALL_CHANNELS_MASK);
 
-    /* Enable managed light-sleep so the stack can idle between scheduler events.
+    /* Set the idle threshold before CAN_SLEEP fires (ms). Light sleep itself is NOT
+     * enabled here — esp_zb_sleep_enable()/esp_pm_configure() are deferred to
+     * zb_arm_light_sleep(), called from the signal handler only after a successful
+     * join. Enabling sleep during the BDB steering scan trips the Task WDT (PR #2).
      * Skipped in the bench build (DISABLE_DEEP_SLEEP) so USB-Serial-JTAG stays up. */
 #ifndef DISABLE_DEEP_SLEEP
-    esp_zb_sleep_enable(true);
-    /* Minimum idle time before the scheduler signals CAN_SLEEP (ms). */
     esp_zb_sleep_set_threshold(2000);
 #endif
 

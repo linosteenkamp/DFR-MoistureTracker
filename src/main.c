@@ -55,6 +55,7 @@
 #include "mqtt_credentials.h"  // MQTT broker credentials (not in git)
 #ifdef USE_ZIGBEE
 #include "zigbee_reporter.h"
+#include "ota_client.h"
 #endif
 
 static const char *TAG = "MAIN";
@@ -604,6 +605,14 @@ static void zb_report_task(void *pv)
         // Push to Zigbee (takes the Zigbee lock — we are not the stack task).
         zigbee_reporter_report(soil_pct, battery_v, battery_pct);
 
+        // After the first good report on a freshly-OTA'd image, confirm it so
+        // the bootloader keeps the new slot; otherwise it auto-reverts on reboot.
+        static bool s_first_report_done = false;
+        if (!s_first_report_done) {
+            s_first_report_done = true;
+            ota_client_mark_valid();
+        }
+
         // Refresh the e-paper with the SAME sample.
         display_telemetry_t dt = {
             .device_id     = device_id_buffer,
@@ -774,6 +783,10 @@ void app_main(void) {
         ESP_LOGI(TAG, "Zigbee ready (joined)");
     } else {
         ESP_LOGW(TAG, "Zigbee not ready (not joined yet) — stack keeps trying");
+    }
+
+    if (ota_client_image_pending_verify()) {
+        ESP_LOGW(TAG, "Running a PENDING-VERIFY image — must report once to confirm");
     }
 
     /* Managed light-sleep: the Zigbee stack task stays alive and pushes periodic

@@ -35,8 +35,11 @@ static void ota_client_burst_end(void);
 static void ota_stall_cb(TimerHandle_t t) {
     (void)t;
     ESP_LOGW(TAG, "OTA stalled — aborting, returning to sleepy mode");
-    if (s_ota_in_progress) { esp_ota_abort(s_ota_handle); s_ota_in_progress = false; }
-    ota_client_burst_end();
+    if (esp_zb_lock_acquire(portMAX_DELAY)) {
+        if (s_ota_in_progress) { esp_ota_abort(s_ota_handle); s_ota_in_progress = false; }
+        ota_client_burst_end();   /* runs under the lock */
+        esp_zb_lock_release();
+    }
 }
 
 static void ota_client_burst_begin(void) {
@@ -47,7 +50,11 @@ static void ota_client_burst_begin(void) {
         s_stall_timer = xTimerCreate("ota_stall", pdMS_TO_TICKS(OTA_STALL_TIMEOUT_MS),
                                      pdFALSE, NULL, ota_stall_cb);
     }
-    if (s_stall_timer) xTimerStart(s_stall_timer, 0);
+    if (s_stall_timer) {
+        xTimerStart(s_stall_timer, 0);
+    } else {
+        ESP_LOGE(TAG, "stall watchdog timer unavailable — OTA proceeds unguarded");
+    }
     ESP_LOGI(TAG, "burst mode ON");
 }
 
@@ -67,6 +74,10 @@ esp_err_t ota_client_on_value(const esp_zb_zcl_ota_upgrade_value_message_t *msg)
 {
     switch (msg->upgrade_status) {
     case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_START:
+        if (s_ota_in_progress) {            /* stale/overlapping session */
+            esp_ota_abort(s_ota_handle);
+            s_ota_in_progress = false;
+        }
         s_ota_part = esp_ota_get_next_update_partition(NULL);
         ESP_LOGI(TAG, "OTA start -> slot %s", s_ota_part ? s_ota_part->label : "?");
         if (!s_ota_part ||
@@ -77,24 +88,29 @@ esp_err_t ota_client_on_value(const esp_zb_zcl_ota_upgrade_value_message_t *msg)
         ota_client_burst_begin();
         return ESP_OK;
 
-    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_RECEIVE:
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_RECEIVE: {
         if (!s_ota_in_progress) return ESP_FAIL;
         ota_client_burst_kick();
-        return esp_ota_write(s_ota_handle, msg->payload, msg->payload_size);
+        esp_err_t werr = esp_ota_write(s_ota_handle, msg->payload, msg->payload_size);
+        if (werr != ESP_OK) ESP_LOGE(TAG, "esp_ota_write failed: %s", esp_err_to_name(werr));
+        return werr;
+    }
 
     case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_CHECK:
     case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_APPLY:
         return ESP_OK;   /* allow the upgrade to proceed */
 
     case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_FINISH:
+        if (!s_ota_in_progress) return ESP_FAIL;
+        s_ota_in_progress = false;
         if (esp_ota_end(s_ota_handle) != ESP_OK ||
             esp_ota_set_boot_partition(s_ota_part) != ESP_OK) {
             ESP_LOGE(TAG, "OTA finalize failed");
-            s_ota_in_progress = false;
             ota_client_burst_end();
             return ESP_FAIL;
         }
         ESP_LOGI(TAG, "OTA complete — rebooting into new image");
+        ota_client_burst_end();   /* stop stall timer / restore before reboot */
         esp_restart();
         return ESP_OK;   /* not reached */
 
@@ -109,6 +125,8 @@ esp_err_t ota_client_on_value(const esp_zb_zcl_ota_upgrade_value_message_t *msg)
         return ESP_OK;
 
     default:
+        /* Intentional no-op: other statuses (e.g. ESP_ZB_ZCL_OTA_UPGRADE_IMAGE_STATUS_NORMAL
+         * = 0x0008) are informational and require no action. */
         return ESP_OK;
     }
 }

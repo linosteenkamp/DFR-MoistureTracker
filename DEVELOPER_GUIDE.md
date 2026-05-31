@@ -569,14 +569,15 @@ Add (or extend) the `ota:` block in zigbee2mqtt's `configuration.yaml`:
 ```yaml
 ota:
   # Point at the raw GitHub URL of ota/index.json on master:
-  zigbee_ota_override_index_location: "https://raw.githubusercontent.com/<owner>/<repo>/master/ota/index.json"
+  zigbee_ota_override_index_location: "https://raw.githubusercontent.com/linosteenkamp/DFR-MoistureTracker/master/ota/index.json"
   # Do not auto-apply updates fleet-wide — roll out manually, one device at a time:
   disable_automatic_update_check: true
 ```
 
-Replace `<owner>/<repo>` with the actual GitHub organisation and repository name.
-The converter (`z2m/dfr_soil_moisture.js`) already declares `ota: ota.zigbeeOTA`,
-so no converter change is needed.
+The converter (`z2m/dfr_soil_moisture.js`) already declares `ota: true` (z2m 2.x
+form), so no converter change is needed. The repo is public, so both the index
+(`raw.githubusercontent.com`) and the release `.ota` assets are fetched by z2m
+over anonymous HTTPS — no token or self-hosted file server required.
 
 ### Cutting a release
 
@@ -656,8 +657,10 @@ the whole fleet.
   (`-Os`, trim logging) for a proportional improvement. The burst-mode logic (rx-on,
   no light sleep, paused reports, stall watchdog) is still required — it keeps the
   device awake and responsive for the duration; do not disable it.
-- **Index URL placeholder**: `<owner>/<repo>` in `configuration.yaml` must be
-  replaced with the real GitHub org/repo before any device will discover updates.
+- **Repo must stay public**: z2m fetches `ota/index.json` (raw GitHub) and the
+  release `.ota` asset over unauthenticated HTTPS. If the repo is ever made
+  private, both URLs would 404 for z2m (release assets/raw on private repos need
+  a token) — host the index + image elsewhere or keep the repo public.
 - **Query interval**: the client polls the OTA server every 30 minutes
   (`OTA_QUERY_INTERVAL_MIN`). After a release is published it may take up to
   30 minutes before z2m marks the device as "update available".

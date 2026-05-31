@@ -19,7 +19,7 @@
 
 // OTA: in zigbee2mqtt configuration.yaml set:
 //   ota:
-//     zigbee_ota_override_index_location: https://raw.githubusercontent.com/<owner>/DFR-MoistureTracker/master/ota/index.json
+//     zigbee_ota_override_index_location: https://raw.githubusercontent.com/linosteenkamp/DFR-MoistureTracker/master/ota/index.json
 //     disable_automatic_update_check: true   # staged/manual rollout
 // Trigger updates per device in the z2m UI (device -> OTA -> Update).
 

@@ -539,6 +539,116 @@ persisted network credentials.
 - The e-paper refreshes after each periodic report, on a dedicated task so the
   ~2 s full refresh runs off the Zigbee stack loop.
 
+## OTA Updates
+
+`src/ota_client.c` adds the Zigbee OTA Upgrade client cluster (0x0019). The device
+advertises `manufacturerCode = 0xFEFE`, `imageType = 0x0001`, and a `fileVersion`
+packed from the git tag via `OTA_PACK_VERSION` (`include/ota_ids.h`). Zigbee2mqtt
+serves images from a GitHub Releases asset; `ota/index.json` is the discovery
+index the z2m instance polls.
+
+### One-time bootstrap (per node, over USB)
+
+The OTA firmware uses a **dual-OTA partition table** (`otadata` + `ota_0` + `ota_1`,
+1.5 MB each). This layout is incompatible with the old single-app table, so the
+first OTA-capable build must be flashed over USB. After that all updates are wireless.
+
+```bash
+# Erase old partition table and flash OTA-capable firmware in one step:
+pio run -e dfrobot_firebeetle2_esp32c6_zigbee -t erase -t upload
+```
+
+After flashing, the device will not rejoin automatically — the erase wiped Zigbee
+network credentials. Re-pair in zigbee2mqtt (enable `permit_join`, power-cycle the
+sensor). This is a one-time step; subsequent updates do not require re-pairing.
+
+### z2m configuration
+
+Add (or extend) the `ota:` block in zigbee2mqtt's `configuration.yaml`:
+
+```yaml
+ota:
+  # Point at the raw GitHub URL of ota/index.json on master:
+  zigbee_ota_override_index_location: "https://raw.githubusercontent.com/<owner>/<repo>/master/ota/index.json"
+  # Do not auto-apply updates fleet-wide — roll out manually, one device at a time:
+  disable_automatic_update_check: true
+```
+
+Replace `<owner>/<repo>` with the actual GitHub organisation and repository name.
+The converter (`z2m/dfr_soil_moisture.js`) already declares `ota: ota.zigbeeOTA`,
+so no converter change is needed.
+
+### Cutting a release
+
+Tag the commit you want to ship and push the tag. The GitHub Action
+(`.github/workflows/release-ota.yml`) handles the rest:
+
+```bash
+git tag v1.2.3
+git push --tags
+```
+
+The action:
+1. Derives `FW_VER_MAJOR/MINOR/PATCH` from the tag and injects them into the
+   firmware build via `-D` flags, producing a deterministic `FW_VERSION_U32`.
+2. Wraps `firmware.bin` into `firmware-v1.2.3.ota` using `tools/make_ota_image.py`.
+3. Publishes a GitHub Release with that asset attached.
+4. Updates `ota/index.json` (via `tools/update_ota_index.py`) and commits it to
+   `master` — z2m will pick it up on its next index poll.
+
+**Version ordering**: `fileVersion` is packed as `0xMMmmppBB` (major, minor, patch,
+build). A release tag must produce a strictly larger `fileVersion` than the firmware
+currently running on the target nodes — otherwise z2m will not offer the update.
+Local dev builds default to `0x00000000`; any tagged release supersedes them.
+
+### Staged rollout / canary
+
+With `disable_automatic_update_check: true`, z2m will not push updates without
+operator action. To roll out a new image:
+
+1. In the zigbee2mqtt UI, open **one** device → **OTA** tab → **Update**.
+2. Observe progress on the serial monitor (if attached) or in the z2m state:
+   - `OTA start -> slot ota_N` — download begins, burst mode activates (rx-on, no
+     light sleep, periodic reports paused, 60 s stall watchdog running).
+   - Data blocks arrive over the air; the download typically takes a few minutes
+     over a good 2.4 GHz link.
+   - `OTA complete — rebooting into new image` — device reboots.
+   - Device rejoins zigbee2mqtt (watch for the join log) and pushes its first report.
+   - `New image confirmed valid (rollback cancelled)` — the bootloader commit is
+     done; the update is permanent.
+3. Verify readings look correct for the canary node.
+4. Repeat step 1–3 for each remaining node.
+
+### Rollback behavior
+
+The bootloader runs with `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`. A freshly
+flashed image stays in `ESP_OTA_IMG_PENDING_VERIFY` until `ota_client_mark_valid()`
+is called. That call happens only after the device successfully rejoins Zigbee and
+delivers at least one telemetry report.
+
+If the new image fails to rejoin and report (crash loop, radio failure, etc.) the
+bootloader automatically reverts to the previous slot on the next boot. The canary
+step exists specifically to catch a "boots but misbehaves" image before it reaches
+the whole fleet.
+
+> **Note**: there is no SoftAP recovery or secure-boot bypass in this version.
+> If rollback also fails (both slots bad), re-flash over USB.
+
+### Limitations and notes
+
+- **Slot size**: each OTA slot is `0x180000` = **1.5 MB**. The current application
+  image is ~1.25 MB (~83% of the slot). Monitor growth with `pio run -t size` before
+  adding large features; exceeding the slot size will abort the OTA at the write
+  stage.
+- **Sleepy-ED download speed**: the burst-mode logic (rx-on, no light sleep) is
+  automatic and required — without it a sleepy end-device download would take hours
+  or time out. Do not disable it.
+- **Index URL placeholder**: `<owner>/<repo>` in `configuration.yaml` must be
+  replaced with the real GitHub org/repo before any device will discover updates.
+- **Query interval**: the client polls the OTA server every 30 minutes
+  (`OTA_QUERY_INTERVAL_MIN`). After a release is published it may take up to
+  30 minutes before z2m marks the device as "update available".
+
 ## Resources
 
 - [ESP-IDF Documentation](https://docs.espressif.com/projects/esp-idf/en/latest/esp32c6/)

@@ -61,6 +61,7 @@ static volatile bool s_joined = false;
 /* Managed-sleep / periodic-report state. */
 static zigbee_report_tick_cb_t s_report_tick_cb     = NULL;
 static uint32_t                s_report_interval_ms = 900000U; /* 15 min default */
+static volatile bool           s_reports_paused     = false;   /* skip tick during OTA */
 
 /* Basic cluster LocationDescription (0x0010): ZCL character string —
  * byte 0 is the length, followed by up to 16 chars. Set via
@@ -75,6 +76,11 @@ void zigbee_reporter_set_report_tick_cb(zigbee_report_tick_cb_t cb)
 void zigbee_reporter_set_interval_ms(uint32_t interval_ms)
 {
     s_report_interval_ms = interval_ms;
+}
+
+void zigbee_reporter_set_reports_paused(bool paused)
+{
+    s_reports_paused = paused;
 }
 
 void zigbee_reporter_set_location(const char *name)
@@ -276,11 +282,16 @@ static void update_attributes_no_lock(float soil_pct, float battery_v, float bat
 static void periodic_report_cb(uint8_t param)
 {
     (void)param;
-    /* Runs in the Zigbee stack task context — must stay cheap. Hand the actual
-     * sample + report + e-paper work to the app task: doing the ~150 ms soil read
-     * (or the ~2 s display refresh) here would stall keep-alives and frame
-     * handling. The task pushes its sample back via zigbee_reporter_report(). */
-    if (s_report_tick_cb) {
+    /* Paused during an OTA download: skip the sample/report/e-paper work so the
+     * radio stays free for image blocks, but still re-arm the alarm below so
+     * reports resume automatically once OTA ends. */
+    if (s_reports_paused) {
+        ESP_LOGD(TAG, "periodic_report_cb: paused (OTA in progress) — skipping tick");
+    } else if (s_report_tick_cb) {
+        /* Runs in the Zigbee stack task context — must stay cheap. Hand the actual
+         * sample + report + e-paper work to the app task: doing the ~150 ms soil read
+         * (or the ~2 s display refresh) here would stall keep-alives and frame
+         * handling. The task pushes its sample back via zigbee_reporter_report(). */
         s_report_tick_cb();
     } else {
         ESP_LOGW(TAG, "periodic_report_cb: no report-tick callback registered");

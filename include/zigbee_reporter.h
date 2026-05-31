@@ -38,4 +38,7 @@ bool zigbee_reporter_wait_ready(uint32_t timeout_ms);
  * callbacks (use the no-lock path inside zigbee_reporter.c instead). */
 esp_err_t zigbee_reporter_report(float soil_pct, float battery_v, float battery_pct);
 
+/* When paused, the periodic report tick is skipped (used during OTA download). */
+void zigbee_reporter_set_reports_paused(bool paused);
+
 #endif // ZIGBEE_REPORTER_H

@@ -7,6 +7,9 @@
 #include "zcl/esp_zigbee_zcl_command.h"  /* esp_zb_zcl_ota_upgrade_value_message_t */
 #include "esp_ota_ops.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/timers.h"
+#include "zigbee_reporter.h"
 
 static const char *TAG = "OTA_CLI";
 #define OTA_QUERY_INTERVAL_MIN  30   /* minutes between image-version queries */
@@ -16,11 +19,49 @@ static const esp_partition_t *s_ota_part = NULL;
 static esp_ota_handle_t       s_ota_handle = 0;
 static bool                   s_ota_in_progress = false;
 
-/* Temporary burst stubs — real implementations land in the next task.
- * Forward-declared (and defined) above ota_client_on_value so it can call them. */
-static void ota_client_burst_begin(void) {}
-static void ota_client_burst_kick(void)  {}
-static void ota_client_burst_end(void)   {}
+/* ---- Burst mode + stall watchdog ----
+ * During a download we keep the radio up and pause periodic reports; a one-shot
+ * timer aborts the transfer if no block arrives within OTA_STALL_TIMEOUT_MS so a
+ * dead server can't leave the device stuck awake (battery drain). */
+#define OTA_STALL_TIMEOUT_MS  60000
+static TimerHandle_t s_stall_timer = NULL;
+
+/* Forward declarations — defined below, but referenced by ota_stall_cb and
+ * ota_client_on_value (which appear before / between the definitions). */
+static void ota_client_burst_begin(void);
+static void ota_client_burst_kick(void);
+static void ota_client_burst_end(void);
+
+static void ota_stall_cb(TimerHandle_t t) {
+    (void)t;
+    ESP_LOGW(TAG, "OTA stalled — aborting, returning to sleepy mode");
+    if (s_ota_in_progress) { esp_ota_abort(s_ota_handle); s_ota_in_progress = false; }
+    ota_client_burst_end();
+}
+
+static void ota_client_burst_begin(void) {
+    zigbee_reporter_set_reports_paused(true);   /* no ADC/e-paper churn mid-OTA */
+    esp_zb_sleep_enable(false);                 /* no light sleep during download */
+    esp_zb_set_rx_on_when_idle(true);           /* keep receiver up for blocks */
+    if (!s_stall_timer) {
+        s_stall_timer = xTimerCreate("ota_stall", pdMS_TO_TICKS(OTA_STALL_TIMEOUT_MS),
+                                     pdFALSE, NULL, ota_stall_cb);
+    }
+    if (s_stall_timer) xTimerStart(s_stall_timer, 0);
+    ESP_LOGI(TAG, "burst mode ON");
+}
+
+static void ota_client_burst_kick(void) {
+    if (s_stall_timer) xTimerReset(s_stall_timer, 0);
+}
+
+static void ota_client_burst_end(void) {
+    if (s_stall_timer) xTimerStop(s_stall_timer, 0);
+    esp_zb_set_rx_on_when_idle(false);          /* back to sleepy ED */
+    esp_zb_sleep_enable(true);
+    zigbee_reporter_set_reports_paused(false);
+    ESP_LOGI(TAG, "burst mode OFF");
+}
 
 esp_err_t ota_client_on_value(const esp_zb_zcl_ota_upgrade_value_message_t *msg)
 {

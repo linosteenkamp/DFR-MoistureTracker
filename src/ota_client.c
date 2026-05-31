@@ -5,6 +5,7 @@
 #include "esp_zigbee_core.h"
 #include "esp_zigbee_ota.h"
 #include "zcl/esp_zigbee_zcl_command.h"  /* esp_zb_zcl_ota_upgrade_value_message_t */
+#include "zcl/esp_zigbee_zcl_ota.h"      /* ESP_ZB_ZCL_ATTR_OTA_UPGRADE_* attr ids */
 #include "esp_ota_ops.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -13,6 +14,8 @@
 
 static const char *TAG = "OTA_CLI";
 #define OTA_QUERY_INTERVAL_MIN  30   /* minutes between image-version queries */
+#define OTA_HW_VERSION          1    /* advertised hardware version */
+#define OTA_MAX_DATA_SIZE       223  /* max OTA image block payload (ZCL max) */
 
 /* ---- OTA download state (single in-flight upgrade) ---- */
 static const esp_partition_t *s_ota_part = NULL;
@@ -151,6 +154,23 @@ void ota_client_add_cluster(esp_zb_cluster_list_t *clusters)
         .ota_upgrade_downloaded_file_ver = FW_VERSION_U32,
     };
     esp_zb_attribute_list_t *ota_attrs = esp_zb_ota_cluster_create(&ota_cfg);
+
+    /* The OTA *client* additionally requires the client-data variable (0xFFF1)
+     * plus server addr/endpoint attrs. esp_zb_ota_cluster_create() only adds the
+     * mandatory attrs; without the client variable the stack dereferences missing
+     * client state and asserts in zcl_ota_upgrade_commands.c at startup. Static
+     * storage so the values outlive this function regardless of how add_attr keeps them. */
+    static esp_zb_zcl_ota_upgrade_client_variable_t ota_var = {
+        .timer_query   = ESP_ZB_ZCL_OTA_UPGRADE_QUERY_TIMER_COUNT_DEF,
+        .hw_version    = OTA_HW_VERSION,
+        .max_data_size = OTA_MAX_DATA_SIZE,
+    };
+    static uint16_t ota_server_addr = 0xFFFF;   /* unknown — discover via the network */
+    static uint8_t  ota_server_ep   = 0xFF;     /* unknown — discover */
+    esp_zb_ota_cluster_add_attr(ota_attrs, ESP_ZB_ZCL_ATTR_OTA_UPGRADE_CLIENT_DATA_ID,     &ota_var);
+    esp_zb_ota_cluster_add_attr(ota_attrs, ESP_ZB_ZCL_ATTR_OTA_UPGRADE_SERVER_ADDR_ID,     &ota_server_addr);
+    esp_zb_ota_cluster_add_attr(ota_attrs, ESP_ZB_ZCL_ATTR_OTA_UPGRADE_SERVER_ENDPOINT_ID, &ota_server_ep);
+
     esp_zb_cluster_list_add_ota_cluster(clusters, ota_attrs, ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE);
     ESP_LOGI(TAG, "OTA client cluster added (fw %s = 0x%08x)",
              FW_VERSION_STR, (unsigned)FW_VERSION_U32);

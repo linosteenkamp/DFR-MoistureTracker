@@ -25,7 +25,6 @@
 
 const {battery, numeric} = require('zigbee-herdsman-converters/lib/modernExtend');
 const exposes = require('zigbee-herdsman-converters/lib/exposes');
-const ota = require('zigbee-herdsman-converters/lib/ota');
 const e = exposes.presets;
 const ea = exposes.access;
 
@@ -70,8 +69,10 @@ module.exports = [
             const ep = device.getEndpoint(1);
             await ep.read('genBasic', ['locationDesc']);
         },
-        // OTA image matched from z2m's override index by manufacturerCode 0xFEFE
+        // OTA (z2m 2.x form): `ota: true` opts the device into z2m's OTA subsystem,
+        // which matches an image from the override index by manufacturerCode 0xFEFE
         // + imageType 0x0001 (see ota/index.json + zigbee_ota_override_index_location).
-        ota: ota.zigbeeOTA,
+        // NOTE: z2m 1.x used `ota: ota.zigbeeOTA` with a lib/ota require instead.
+        ota: true,
     },
 ];

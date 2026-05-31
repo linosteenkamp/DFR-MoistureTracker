@@ -610,8 +610,9 @@ operator action. To roll out a new image:
 2. Observe progress on the serial monitor (if attached) or in the z2m state:
    - `OTA start -> slot ota_N` — download begins, burst mode activates (rx-on, no
      light sleep, periodic reports paused, 60 s stall watchdog running).
-   - Data blocks arrive over the air; the download typically takes a few minutes
-     over a good 2.4 GHz link.
+   - Data blocks arrive over the air. **Expect ~3 hours, not minutes** — see the
+     transfer-time note below. Leave the device powered (it stays awake for the
+     whole download); run the canary overnight.
    - `OTA complete — rebooting into new image` — device reboots.
    - Device rejoins zigbee2mqtt (watch for the join log) and pushes its first report.
    - `New image confirmed valid (rollback cancelled)` — the bootloader commit is
@@ -640,9 +641,21 @@ the whole fleet.
   image is ~1.25 MB (~83% of the slot). Monitor growth with `pio run -t size` before
   adding large features; exceeding the slot size will abort the OTA at the write
   stage.
-- **Sleepy-ED download speed**: the burst-mode logic (rx-on, no light sleep) is
-  automatic and required — without it a sleepy end-device download would take hours
-  or time out. Do not disable it.
+- **Transfer time (~3 hours) is expected and not a bug.** A full ~1.25 MB image
+  takes roughly 3 h to a sleepy battery end-device. Measured on the wire: ~50-byte
+  blocks (coordinator-capped — it won't fragment larger even though the device
+  requests 223 B) delivered one per **~445 ms**. That ~445 ms is the end-device ↔
+  coordinator **indirect-poll round-trip** (the device polls its parent and gets one
+  buffered block per poll); z2m itself emits each block in <1 ms and flash writes are
+  microseconds, so neither is the bottleneck. This is **inherent to a polled sleepy
+  device** and is *not* tunable from firmware: lowering the long-poll interval,
+  ZBOSS turbo poll, and the turbo-poll retry feature were all tried and had **zero**
+  effect (the cadence is set by the coordinator's indirect delivery). Mains-powered
+  *router* devices OTA far faster because the coordinator pushes to them at airtime
+  speed with no poll gate. The only firmware-side lever is a **smaller image**
+  (`-Os`, trim logging) for a proportional improvement. The burst-mode logic (rx-on,
+  no light sleep, paused reports, stall watchdog) is still required — it keeps the
+  device awake and responsive for the duration; do not disable it.
 - **Index URL placeholder**: `<owner>/<repo>` in `configuration.yaml` must be
   replaced with the real GitHub org/repo before any device will discover updates.
 - **Query interval**: the client polls the OTA server every 30 minutes

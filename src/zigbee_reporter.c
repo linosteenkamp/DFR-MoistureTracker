@@ -195,6 +195,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                          esp_zb_get_short_address());
                 s_joined = true;
                 zb_arm_light_sleep();   /* safe now — commissioning is done */
+                ota_client_on_joined(); /* discover OTA server + arm image queries */
                 /* Schedule the first periodic report ~1 s after rejoin. */
                 esp_zb_scheduler_alarm(periodic_report_cb, 0, 1000U);
             }
@@ -211,6 +212,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                      esp_zb_get_short_address());
             s_joined = true;
             zb_arm_light_sleep();   /* safe now — steering scan is done */
+            ota_client_on_joined(); /* discover OTA server + arm image queries */
             /* Schedule the first periodic report ~1 s after fresh join. */
             esp_zb_scheduler_alarm(periodic_report_cb, 0, 1000U);
         } else {

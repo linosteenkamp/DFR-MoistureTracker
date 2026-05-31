@@ -6,6 +6,7 @@
 #include "esp_zigbee_ota.h"
 #include "zcl/esp_zigbee_zcl_command.h"  /* esp_zb_zcl_ota_upgrade_value_message_t */
 #include "zcl/esp_zigbee_zcl_ota.h"      /* ESP_ZB_ZCL_ATTR_OTA_UPGRADE_* attr ids */
+#include "zdo/esp_zigbee_zdo_command.h"  /* esp_zb_zdo_match_cluster, match_desc_req_param_t */
 #include "esp_ota_ops.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -13,7 +14,7 @@
 #include "zigbee_reporter.h"
 
 static const char *TAG = "OTA_CLI";
-#define OTA_QUERY_INTERVAL_MIN  30   /* minutes between image-version queries */
+#define OTA_QUERY_INTERVAL_MIN  30   /* periodic image-query fallback (device-initiated) */
 #define OTA_HW_VERSION          1    /* advertised hardware version */
 #define OTA_MAX_DATA_SIZE       223  /* max OTA image block payload (ZCL max) */
 
@@ -21,6 +22,15 @@ static const char *TAG = "OTA_CLI";
 static const esp_partition_t *s_ota_part = NULL;
 static esp_ota_handle_t       s_ota_handle = 0;
 static bool                   s_ota_in_progress = false;
+static uint32_t               s_ota_received = 0;   /* bytes of the .ota file seen so far */
+
+/* The esp-zigbee stack parses + strips the 56-byte Zigbee OTA header before
+ * invoking this callback, so msg->payload begins at the sub-element (tag u16 +
+ * length u32 = 6 bytes), then the actual ESP app image (magic 0xE9). We skip the
+ * 6-byte sub-element header from the payload STREAM so only the app image reaches
+ * esp_ota_write. (Confirmed empirically: the first delivered byte is 0x00 = the
+ * sub-element tag, not 0x1E = the OTA file magic, which would mean no stripping.) */
+#define OTA_IMAGE_SKIP_BYTES  6
 
 /* ---- Burst mode + stall watchdog ----
  * During a download we keep the radio up and pause periodic reports; a one-shot
@@ -88,13 +98,37 @@ esp_err_t ota_client_on_value(const esp_zb_zcl_ota_upgrade_value_message_t *msg)
             return ESP_FAIL;
         }
         s_ota_in_progress = true;
+        s_ota_received = 0;
         ota_client_burst_begin();
         return ESP_OK;
 
     case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_RECEIVE: {
         if (!s_ota_in_progress) return ESP_FAIL;
         ota_client_burst_kick();
-        esp_err_t werr = esp_ota_write(s_ota_handle, msg->payload, msg->payload_size);
+
+        const uint8_t *data = msg->payload;
+        uint16_t       len  = msg->payload_size;
+
+        if (s_ota_received == 0 && len >= 8) {
+            ESP_LOGI(TAG, "OTA first payload bytes: %02x %02x %02x %02x %02x %02x %02x %02x",
+                     data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]);
+        }
+
+        /* Skip the Zigbee OTA header + sub-element header so only the app image
+         * reaches esp_ota_write. The header spans the first OTA_IMAGE_SKIP_BYTES
+         * of the file and may straddle this block. */
+        if (s_ota_received < OTA_IMAGE_SKIP_BYTES) {
+            uint32_t skip = OTA_IMAGE_SKIP_BYTES - s_ota_received;
+            if (skip >= len) {            /* whole block is still header */
+                s_ota_received += len;
+                return ESP_OK;
+            }
+            data += skip;
+            len  -= (uint16_t)skip;
+        }
+        s_ota_received += msg->payload_size;
+
+        esp_err_t werr = esp_ota_write(s_ota_handle, data, len);
         if (werr != ESP_OK) ESP_LOGE(TAG, "esp_ota_write failed: %s", esp_err_to_name(werr));
         return werr;
     }
@@ -176,21 +210,52 @@ void ota_client_add_cluster(esp_zb_cluster_list_t *clusters)
              FW_VERSION_STR, (unsigned)FW_VERSION_U32);
 }
 
+/* Client endpoint, captured in ota_client_start, used when arming the query. */
+static uint8_t s_app_endpoint = 0;
+
+/* ZDO match-descriptor callback: fires with the discovered OTA server's short
+ * address + endpoint. Arm periodic querying and send the first image query.
+ * NOTE arg order: esp_zb_ota_upgrade_client_query_image_req(addr_u16, ep_u8) —
+ * the header's param NAMES are swapped vs their types; addr is the uint16. */
+static void ota_find_server_cb(esp_zb_zdp_status_t status, uint16_t addr, uint8_t endpoint, void *ctx)
+{
+    (void)ctx;
+    if (status != ESP_ZB_ZDP_STATUS_SUCCESS) {
+        ESP_LOGW(TAG, "OTA server not found (zdo status %d)", status);
+        return;
+    }
+    esp_zb_ota_upgrade_client_query_interval_set(s_app_endpoint, OTA_QUERY_INTERVAL_MIN);
+    esp_zb_ota_upgrade_client_query_image_req(addr, endpoint);
+    ESP_LOGI(TAG, "OTA server @0x%04x ep %u — querying every %d min",
+             addr, endpoint, OTA_QUERY_INTERVAL_MIN);
+}
+
 void ota_client_start(uint8_t endpoint)
 {
+    s_app_endpoint = endpoint;
     esp_zb_core_action_handler_register(zb_action_handler);
-    esp_zb_ota_upgrade_client_query_interval_set(endpoint, OTA_QUERY_INTERVAL_MIN);
+    /* The periodic query + first image request are armed only AFTER the OTA
+     * server is discovered (ota_client_on_joined → ota_find_server_cb); the
+     * client never queries on its own without that bootstrap. */
+    ESP_LOGI(TAG, "OTA client ready (endpoint %u) — server discovery on join", endpoint);
+}
 
-    /* DECISION: we do NOT call esp_zb_ota_upgrade_client_query_image_req() here.
-     * Per docs/ota-api-notes.md (sections 4 & 9) its signature is
-     * (uint16_t server_ep, uint8_t server_addr) and it requires the OTA server's
-     * endpoint and short address to already be known. At start time the device
-     * has not yet discovered/bound an OTA server, so any args would be guesses.
-     * Instead we rely on the periodic interval query above, which the stack
-     * drives automatically once the OTA server is known. The manual req can be
-     * issued from the value callback in a later task if directed discovery is
-     * needed. */
-    ESP_LOGI(TAG, "OTA client started (query every %d min)", OTA_QUERY_INTERVAL_MIN);
+void ota_client_on_joined(void)
+{
+    /* Discover the coordinator's OTA Upgrade server; ota_find_server_cb then arms
+     * the query. Called from the Zigbee signal handler on join success (stack
+     * context, lock already held — do NOT acquire the Zigbee lock here). */
+    static uint16_t cluster_list[] = { ESP_ZB_ZCL_CLUSTER_ID_OTA_UPGRADE };
+    esp_zb_zdo_match_desc_req_param_t req = {
+        .dst_nwk_addr     = 0x0000,   /* coordinator */
+        .addr_of_interest = 0x0000,
+        .profile_id       = ESP_ZB_AF_HA_PROFILE_ID,
+        .num_in_clusters  = 1,
+        .num_out_clusters = 0,
+        .cluster_list     = cluster_list,
+    };
+    esp_zb_zdo_match_cluster(&req, ota_find_server_cb, NULL);
+    ESP_LOGI(TAG, "OTA: discovering server on coordinator");
 }
 
 bool ota_client_image_pending_verify(void)

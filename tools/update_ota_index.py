@@ -21,7 +21,7 @@ def main():
         "imageType": int(a.image_type, 0),
         "fileVersion": int(a.file_version, 0),
         "url": a.url,
-        "imageSize": len(blob),
+        "fileSize": len(blob),
         "sha512": hashlib.sha512(blob).hexdigest(),
     }
 

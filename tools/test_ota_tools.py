@@ -43,5 +43,5 @@ def test_update_index_replaces_same_model(tmp_path):
     mine = [e for e in entries if e["modelId"] == "DFR-SoilSensor"]
     assert len(mine) == 1                       # replaced, not appended
     assert mine[0]["fileVersion"] == 0x01000100
-    assert mine[0]["imageSize"] == 200
+    assert mine[0]["fileSize"] == 200            # z2m override-index schema uses fileSize
     assert mine[0]["url"] == "https://example/fw.ota"

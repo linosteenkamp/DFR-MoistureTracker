@@ -1,4 +1,4 @@
-import struct, subprocess, sys
+import json, struct, subprocess, sys
 from pathlib import Path
 
 HERE = Path(__file__).parent
@@ -28,3 +28,20 @@ def test_make_ota_image_header(tmp_path):
     assert tag == 0x0000
     assert length == 1000
     assert data[62:] == b"\xAA" * 1000
+
+def test_update_index_replaces_same_model(tmp_path):
+    idx = tmp_path / "index.json"
+    img = tmp_path / "fw.ota"
+    img.write_bytes(b"\x00" * 200)
+    args = [sys.executable, str(HERE / "update_ota_index.py"),
+            "--index", str(idx), "--model", "DFR-SoilSensor",
+            "--manufacturer", "0xFEFE", "--image-type", "0x0001",
+            "--url", "https://example/fw.ota", "--image", str(img)]
+    subprocess.run(args + ["--file-version", "0x01000000"], check=True)
+    subprocess.run(args + ["--file-version", "0x01000100"], check=True)
+    entries = json.loads(idx.read_text())
+    mine = [e for e in entries if e["modelId"] == "DFR-SoilSensor"]
+    assert len(mine) == 1                       # replaced, not appended
+    assert mine[0]["fileVersion"] == 0x01000100
+    assert mine[0]["imageSize"] == 200
+    assert mine[0]["url"] == "https://example/fw.ota"

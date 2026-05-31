@@ -17,8 +17,15 @@
 // trigger a re-interview / "reconfigure" in z2m so the configure() below reads
 // locationDesc.
 
+// OTA: in zigbee2mqtt configuration.yaml set:
+//   ota:
+//     zigbee_ota_override_index_location: https://raw.githubusercontent.com/<owner>/DFR-MoistureTracker/master/ota/index.json
+//     disable_automatic_update_check: true   # staged/manual rollout
+// Trigger updates per device in the z2m UI (device -> OTA -> Update).
+
 const {battery, numeric} = require('zigbee-herdsman-converters/lib/modernExtend');
 const exposes = require('zigbee-herdsman-converters/lib/exposes');
+const ota = require('zigbee-herdsman-converters/lib/ota');
 const e = exposes.presets;
 const ea = exposes.access;
 
@@ -63,5 +70,8 @@ module.exports = [
             const ep = device.getEndpoint(1);
             await ep.read('genBasic', ['locationDesc']);
         },
+        // OTA image matched from z2m's override index by manufacturerCode 0xFEFE
+        // + imageType 0x0001 (see ota/index.json + zigbee_ota_override_index_location).
+        ota: ota.zigbeeOTA,
     },
 ];

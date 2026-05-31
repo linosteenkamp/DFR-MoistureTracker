@@ -11,6 +11,7 @@
 
 #include "zigbee_reporter.h"
 #include "zigbee_encode.h"
+#include "ota_client.h"
 
 /* Classic esp_zb_* API, native to esp-zigbee-lib 1.6.x (headers at the
  * include root; no compat/ prefix). Matched pair with esp-zboss-lib 1.6.x. */
@@ -417,6 +418,7 @@ static void esp_zb_task(void *pv)
                                                  ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
     esp_zb_cluster_list_add_humidity_meas_cluster(clusters, humidity_attrs,
                                                   ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+    ota_client_add_cluster(clusters);
 
     /* ---- Register endpoint ---- */
     esp_zb_ep_list_t *ep_list = esp_zb_ep_list_create();
@@ -455,6 +457,7 @@ static void esp_zb_task(void *pv)
 
     /* Start the stack (autostart=false — we drive commissioning via signal handler). */
     ESP_ERROR_CHECK(esp_zb_start(false));
+    ota_client_start(APP_ENDPOINT);
 
     /* Blocks until stack is deinitialised (never returns under normal operation). */
     esp_zb_stack_main_loop();

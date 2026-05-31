@@ -7,6 +7,7 @@ set(SRCS
     "main.c"
     "mqtt_publisher.c"
     "nvs_shim_esp.c"
+    "ota_client.c"
     "soil_calibration.c"
     "soil_moisture.c"
     "wifi_credentials.c"

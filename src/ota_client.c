@@ -4,11 +4,84 @@
 #include "fw_version.h"
 #include "esp_zigbee_core.h"
 #include "esp_zigbee_ota.h"
+#include "zcl/esp_zigbee_zcl_command.h"  /* esp_zb_zcl_ota_upgrade_value_message_t */
 #include "esp_ota_ops.h"
 #include "esp_log.h"
 
 static const char *TAG = "OTA_CLI";
 #define OTA_QUERY_INTERVAL_MIN  30   /* minutes between image-version queries */
+
+/* ---- OTA download state (single in-flight upgrade) ---- */
+static const esp_partition_t *s_ota_part = NULL;
+static esp_ota_handle_t       s_ota_handle = 0;
+static bool                   s_ota_in_progress = false;
+
+/* Temporary burst stubs — real implementations land in the next task.
+ * Forward-declared (and defined) above ota_client_on_value so it can call them. */
+static void ota_client_burst_begin(void) {}
+static void ota_client_burst_kick(void)  {}
+static void ota_client_burst_end(void)   {}
+
+esp_err_t ota_client_on_value(const esp_zb_zcl_ota_upgrade_value_message_t *msg)
+{
+    switch (msg->upgrade_status) {
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_START:
+        s_ota_part = esp_ota_get_next_update_partition(NULL);
+        ESP_LOGI(TAG, "OTA start -> slot %s", s_ota_part ? s_ota_part->label : "?");
+        if (!s_ota_part ||
+            esp_ota_begin(s_ota_part, OTA_SIZE_UNKNOWN, &s_ota_handle) != ESP_OK) {
+            return ESP_FAIL;
+        }
+        s_ota_in_progress = true;
+        ota_client_burst_begin();
+        return ESP_OK;
+
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_RECEIVE:
+        if (!s_ota_in_progress) return ESP_FAIL;
+        ota_client_burst_kick();
+        return esp_ota_write(s_ota_handle, msg->payload, msg->payload_size);
+
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_CHECK:
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_APPLY:
+        return ESP_OK;   /* allow the upgrade to proceed */
+
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_FINISH:
+        if (esp_ota_end(s_ota_handle) != ESP_OK ||
+            esp_ota_set_boot_partition(s_ota_part) != ESP_OK) {
+            ESP_LOGE(TAG, "OTA finalize failed");
+            s_ota_in_progress = false;
+            ota_client_burst_end();
+            return ESP_FAIL;
+        }
+        ESP_LOGI(TAG, "OTA complete — rebooting into new image");
+        esp_restart();
+        return ESP_OK;   /* not reached */
+
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_ABORT:
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_ERROR:
+        if (s_ota_in_progress) {
+            esp_ota_abort(s_ota_handle);
+            s_ota_in_progress = false;
+            ota_client_burst_end();
+        }
+        ESP_LOGW(TAG, "OTA aborted (status %d)", msg->upgrade_status);
+        return ESP_OK;
+
+    default:
+        return ESP_OK;
+    }
+}
+
+/* Single global core action handler — dispatches on callback id.
+ * No other module registers one (verified by grep); if that changes, the OTA
+ * dispatch must move into the shared handler rather than registering a second. */
+static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t cb_id, const void *message)
+{
+    if (cb_id == ESP_ZB_CORE_OTA_UPGRADE_VALUE_CB_ID) {
+        return ota_client_on_value((const esp_zb_zcl_ota_upgrade_value_message_t *)message);
+    }
+    return ESP_OK;
+}
 
 void ota_client_add_cluster(esp_zb_cluster_list_t *clusters)
 {
@@ -26,6 +99,7 @@ void ota_client_add_cluster(esp_zb_cluster_list_t *clusters)
 
 void ota_client_start(uint8_t endpoint)
 {
+    esp_zb_core_action_handler_register(zb_action_handler);
     esp_zb_ota_upgrade_client_query_interval_set(endpoint, OTA_QUERY_INTERVAL_MIN);
 
     /* DECISION: we do NOT call esp_zb_ota_upgrade_client_query_image_req() here.

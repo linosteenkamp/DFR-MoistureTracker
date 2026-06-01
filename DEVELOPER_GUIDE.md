@@ -136,7 +136,7 @@ Boot → Check NVS → [Provisioned?]
 {
   "battery": 4.15,
   "soil_moisture": 67.5,
-  "device": "sensor02"
+  "device": "moisture01"
 }
 ```
 

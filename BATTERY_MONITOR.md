@@ -98,13 +98,14 @@ esp_err_t battery_monitor_deinit(void);
 
 ## Integration with MQTT
 
-Battery voltage is automatically published every 30 seconds:
+Battery voltage is published with each telemetry reading (hourly on the WiFi
+build; every 15 min on the Zigbee build):
 
 ```json
 {
   "battery": 3.85,
   "soil_moisture": 65.0,
-  "device": "sensor02"
+  "device": "moisture01"
 }
 ```
 

@@ -1,0 +1,80 @@
+name: Release OTA
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  OTA_MANUFACTURER_CODE: "0xFEFE"
+  OTA_IMAGE_TYPE: "0x0001"
+  MODEL_ID: "DFR-SoilSensor"
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - name: Derive version from tag
+        id: ver
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          IFS=. read -r MA MI PA <<< "$TAG"
+          printf 'file_version=0x%02X%02X%02X00\n' "$MA" "$MI" "$PA" >> "$GITHUB_OUTPUT"
+          echo "semver=$TAG" >> "$GITHUB_OUTPUT"
+          echo "ma=$MA" >> "$GITHUB_OUTPUT"
+          echo "mi=$MI" >> "$GITHUB_OUTPUT"
+          echo "pa=$PA" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'   # pioarduino platform requires Python 3.10–3.13 (3.x picks 3.14, rejected)
+      - run: pip install platformio pytest
+
+      - name: Unit tests (host tools + native)
+        run: |
+          python -m pytest tools/test_ota_tools.py -v
+          pio test -e native
+
+      - name: Build Zigbee firmware (version injected)
+        run: |
+          cp include/mqtt_credentials.h.example include/mqtt_credentials.h
+          PLATFORMIO_BUILD_FLAGS="-DFW_VER_MAJOR=${{ steps.ver.outputs.ma }} -DFW_VER_MINOR=${{ steps.ver.outputs.mi }} -DFW_VER_PATCH=${{ steps.ver.outputs.pa }}" \
+            pio run -e dfrobot_firebeetle2_esp32c6_zigbee
+
+      - name: Wrap into .ota
+        run: |
+          python tools/make_ota_image.py \
+            --in .pio/build/dfrobot_firebeetle2_esp32c6_zigbee/firmware.bin \
+            --out firmware-${{ steps.ver.outputs.semver }}.ota \
+            --manufacturer ${{ env.OTA_MANUFACTURER_CODE }} \
+            --image-type ${{ env.OTA_IMAGE_TYPE }} \
+            --file-version ${{ steps.ver.outputs.file_version }}
+
+      - name: Update index against master tip
+        run: |
+          python tools/update_ota_index.py \
+            --index ota/index.json --model "${{ env.MODEL_ID }}" \
+            --manufacturer ${{ env.OTA_MANUFACTURER_CODE }} \
+            --image-type ${{ env.OTA_IMAGE_TYPE }} \
+            --file-version ${{ steps.ver.outputs.file_version }} \
+            --url "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/firmware-${{ steps.ver.outputs.semver }}.ota" \
+            --image firmware-${{ steps.ver.outputs.semver }}.ota
+
+      - name: Create Release with .ota asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: firmware-${{ steps.ver.outputs.semver }}.ota
+
+      - name: Commit index to master
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ota/index.json
+          git commit -m "ota: index for ${{ github.ref_name }}" || echo "no change"
+          git push origin HEAD:master

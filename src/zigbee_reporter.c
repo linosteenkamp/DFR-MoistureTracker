@@ -11,6 +11,7 @@
 
 #include "zigbee_reporter.h"
 #include "zigbee_encode.h"
+#include "ota_client.h"
 
 /* Classic esp_zb_* API, native to esp-zigbee-lib 1.6.x (headers at the
  * include root; no compat/ prefix). Matched pair with esp-zboss-lib 1.6.x. */
@@ -60,6 +61,7 @@ static volatile bool s_joined = false;
 /* Managed-sleep / periodic-report state. */
 static zigbee_report_tick_cb_t s_report_tick_cb     = NULL;
 static uint32_t                s_report_interval_ms = 900000U; /* 15 min default */
+static volatile bool           s_reports_paused     = false;   /* skip tick during OTA */
 
 /* Basic cluster LocationDescription (0x0010): ZCL character string —
  * byte 0 is the length, followed by up to 16 chars. Set via
@@ -74,6 +76,11 @@ void zigbee_reporter_set_report_tick_cb(zigbee_report_tick_cb_t cb)
 void zigbee_reporter_set_interval_ms(uint32_t interval_ms)
 {
     s_report_interval_ms = interval_ms;
+}
+
+void zigbee_reporter_set_reports_paused(bool paused)
+{
+    s_reports_paused = paused;
 }
 
 void zigbee_reporter_set_location(const char *name)
@@ -188,6 +195,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                          esp_zb_get_short_address());
                 s_joined = true;
                 zb_arm_light_sleep();   /* safe now — commissioning is done */
+                ota_client_on_joined(); /* discover OTA server + arm image queries */
                 /* Schedule the first periodic report ~1 s after rejoin. */
                 esp_zb_scheduler_alarm(periodic_report_cb, 0, 1000U);
             }
@@ -204,6 +212,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                      esp_zb_get_short_address());
             s_joined = true;
             zb_arm_light_sleep();   /* safe now — steering scan is done */
+            ota_client_on_joined(); /* discover OTA server + arm image queries */
             /* Schedule the first periodic report ~1 s after fresh join. */
             esp_zb_scheduler_alarm(periodic_report_cb, 0, 1000U);
         } else {
@@ -275,11 +284,16 @@ static void update_attributes_no_lock(float soil_pct, float battery_v, float bat
 static void periodic_report_cb(uint8_t param)
 {
     (void)param;
-    /* Runs in the Zigbee stack task context — must stay cheap. Hand the actual
-     * sample + report + e-paper work to the app task: doing the ~150 ms soil read
-     * (or the ~2 s display refresh) here would stall keep-alives and frame
-     * handling. The task pushes its sample back via zigbee_reporter_report(). */
-    if (s_report_tick_cb) {
+    /* Paused during an OTA download: skip the sample/report/e-paper work so the
+     * radio stays free for image blocks, but still re-arm the alarm below so
+     * reports resume automatically once OTA ends. */
+    if (s_reports_paused) {
+        ESP_LOGD(TAG, "periodic_report_cb: paused (OTA in progress) — skipping tick");
+    } else if (s_report_tick_cb) {
+        /* Runs in the Zigbee stack task context — must stay cheap. Hand the actual
+         * sample + report + e-paper work to the app task: doing the ~150 ms soil read
+         * (or the ~2 s display refresh) here would stall keep-alives and frame
+         * handling. The task pushes its sample back via zigbee_reporter_report(). */
         s_report_tick_cb();
     } else {
         ESP_LOGW(TAG, "periodic_report_cb: no report-tick callback registered");
@@ -417,6 +431,7 @@ static void esp_zb_task(void *pv)
                                                  ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
     esp_zb_cluster_list_add_humidity_meas_cluster(clusters, humidity_attrs,
                                                   ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+    ota_client_add_cluster(clusters);
 
     /* ---- Register endpoint ---- */
     esp_zb_ep_list_t *ep_list = esp_zb_ep_list_create();
@@ -455,6 +470,7 @@ static void esp_zb_task(void *pv)
 
     /* Start the stack (autostart=false — we drive commissioning via signal handler). */
     ESP_ERROR_CHECK(esp_zb_start(false));
+    ota_client_start(APP_ENDPOINT);
 
     /* Blocks until stack is deinitialised (never returns under normal operation). */
     esp_zb_stack_main_loop();

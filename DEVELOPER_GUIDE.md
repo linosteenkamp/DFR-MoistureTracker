@@ -136,7 +136,7 @@ Boot → Check NVS → [Provisioned?]
 {
   "battery": 4.15,
   "soil_moisture": 67.5,
-  "device": "sensor02"
+  "device": "moisture01"
 }
 ```
 
@@ -538,6 +538,132 @@ persisted network credentials.
   (the GPIO7 button is used for the config portal in SP2 — see above).
 - The e-paper refreshes after each periodic report, on a dedicated task so the
   ~2 s full refresh runs off the Zigbee stack loop.
+
+## OTA Updates
+
+`src/ota_client.c` adds the Zigbee OTA Upgrade client cluster (0x0019). The device
+advertises `manufacturerCode = 0xFEFE`, `imageType = 0x0001`, and a `fileVersion`
+packed from the git tag via `OTA_PACK_VERSION` (`include/ota_ids.h`). Zigbee2mqtt
+serves images from a GitHub Releases asset; `ota/index.json` is the discovery
+index the z2m instance polls.
+
+### One-time bootstrap (per node, over USB)
+
+The OTA firmware uses a **dual-OTA partition table** (`otadata` + `ota_0` + `ota_1`,
+1.5 MB each). This layout is incompatible with the old single-app table, so the
+first OTA-capable build must be flashed over USB. After that all updates are wireless.
+
+```bash
+# Erase old partition table and flash OTA-capable firmware in one step:
+pio run -e dfrobot_firebeetle2_esp32c6_zigbee -t erase -t upload
+```
+
+After flashing, the device will not rejoin automatically — the erase wiped Zigbee
+network credentials. Re-pair in zigbee2mqtt (enable `permit_join`, power-cycle the
+sensor). This is a one-time step; subsequent updates do not require re-pairing.
+
+### z2m configuration
+
+Add (or extend) the `ota:` block in zigbee2mqtt's `configuration.yaml`:
+
+```yaml
+ota:
+  # Point at the raw GitHub URL of ota/index.json on master:
+  zigbee_ota_override_index_location: "https://raw.githubusercontent.com/linosteenkamp/DFR-MoistureTracker/master/ota/index.json"
+  # Do not auto-apply updates fleet-wide — roll out manually, one device at a time:
+  disable_automatic_update_check: true
+```
+
+The converter (`z2m/dfr_soil_moisture.js`) already declares `ota: true` (z2m 2.x
+form), so no converter change is needed. The repo is public, so both the index
+(`raw.githubusercontent.com`) and the release `.ota` assets are fetched by z2m
+over anonymous HTTPS — no token or self-hosted file server required.
+
+### Cutting a release
+
+Tag the commit you want to ship and push the tag. The GitHub Action
+(`.github/workflows/release-ota.yml`) handles the rest:
+
+```bash
+git tag v1.2.3
+git push --tags
+```
+
+The action:
+1. Derives `FW_VER_MAJOR/MINOR/PATCH` from the tag and injects them into the
+   firmware build via `-D` flags, producing a deterministic `FW_VERSION_U32`.
+2. Wraps `firmware.bin` into `firmware-v1.2.3.ota` using `tools/make_ota_image.py`.
+3. Publishes a GitHub Release with that asset attached.
+4. Updates `ota/index.json` (via `tools/update_ota_index.py`) and commits it to
+   `master` — z2m will pick it up on its next index poll.
+
+**Version ordering**: `fileVersion` is packed as `0xMMmmppBB` (major, minor, patch,
+build). A release tag must produce a strictly larger `fileVersion` than the firmware
+currently running on the target nodes — otherwise z2m will not offer the update.
+Local dev builds default to `0x00000000`; any tagged release supersedes them.
+
+### Staged rollout / canary
+
+With `disable_automatic_update_check: true`, z2m will not push updates without
+operator action. To roll out a new image:
+
+1. In the zigbee2mqtt UI, open **one** device → **OTA** tab → **Update**.
+2. Observe progress on the serial monitor (if attached) or in the z2m state:
+   - `OTA start -> slot ota_N` — download begins, burst mode activates (rx-on, no
+     light sleep, periodic reports paused, 60 s stall watchdog running).
+   - Data blocks arrive over the air. **Expect ~3 hours, not minutes** — see the
+     transfer-time note below. Leave the device powered (it stays awake for the
+     whole download); run the canary overnight.
+   - `OTA complete — rebooting into new image` — device reboots.
+   - Device rejoins zigbee2mqtt (watch for the join log) and pushes its first report.
+   - `New image confirmed valid (rollback cancelled)` — the bootloader commit is
+     done; the update is permanent.
+3. Verify readings look correct for the canary node.
+4. Repeat step 1–3 for each remaining node.
+
+### Rollback behavior
+
+The bootloader runs with `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`. A freshly
+flashed image stays in `ESP_OTA_IMG_PENDING_VERIFY` until `ota_client_mark_valid()`
+is called. That call happens only after the device successfully rejoins Zigbee and
+delivers at least one telemetry report.
+
+If the new image fails to rejoin and report (crash loop, radio failure, etc.) the
+bootloader automatically reverts to the previous slot on the next boot. The canary
+step exists specifically to catch a "boots but misbehaves" image before it reaches
+the whole fleet.
+
+> **Note**: there is no SoftAP recovery or secure-boot bypass in this version.
+> If rollback also fails (both slots bad), re-flash over USB.
+
+### Limitations and notes
+
+- **Slot size**: each OTA slot is `0x180000` = **1.5 MB**. The current application
+  image is ~1.25 MB (~83% of the slot). Monitor growth with `pio run -t size` before
+  adding large features; exceeding the slot size will abort the OTA at the write
+  stage.
+- **Transfer time (~3 hours) is expected and not a bug.** A full ~1.25 MB image
+  takes roughly 3 h to a sleepy battery end-device. Measured on the wire: ~50-byte
+  blocks (coordinator-capped — it won't fragment larger even though the device
+  requests 223 B) delivered one per **~445 ms**. That ~445 ms is the end-device ↔
+  coordinator **indirect-poll round-trip** (the device polls its parent and gets one
+  buffered block per poll); z2m itself emits each block in <1 ms and flash writes are
+  microseconds, so neither is the bottleneck. This is **inherent to a polled sleepy
+  device** and is *not* tunable from firmware: lowering the long-poll interval,
+  ZBOSS turbo poll, and the turbo-poll retry feature were all tried and had **zero**
+  effect (the cadence is set by the coordinator's indirect delivery). Mains-powered
+  *router* devices OTA far faster because the coordinator pushes to them at airtime
+  speed with no poll gate. The only firmware-side lever is a **smaller image**
+  (`-Os`, trim logging) for a proportional improvement. The burst-mode logic (rx-on,
+  no light sleep, paused reports, stall watchdog) is still required — it keeps the
+  device awake and responsive for the duration; do not disable it.
+- **Repo must stay public**: z2m fetches `ota/index.json` (raw GitHub) and the
+  release `.ota` asset over unauthenticated HTTPS. If the repo is ever made
+  private, both URLs would 404 for z2m (release assets/raw on private repos need
+  a token) — host the index + image elsewhere or keep the repo public.
+- **Query interval**: the client polls the OTA server every 30 minutes
+  (`OTA_QUERY_INTERVAL_MIN`). After a release is published it may take up to
+  30 minutes before z2m marks the device as "update available".
 
 ## Resources
 

@@ -116,7 +116,7 @@ ESP32-C6 ADC units **cannot be initialized more than once**. `adc_manager` owns 
 ### Key Configuration Constants (`src/main.c`)
 
 ```c
-#define DEFAULT_DEVICE_ID         "sensor02"   // Fallback if not provisioned
+#define DEFAULT_DEVICE_ID         "moisture01"  // Fallback if not provisioned
 #define DEEP_SLEEP_INTERVAL_SEC   3600          // 1 hour
 #define WIFI_TIMEOUT_SEC          30            // Auto-restart if WiFi fails
 #define MQTT_WAIT_MS              3000          // Max wait for broker connect
@@ -147,11 +147,19 @@ Follow the pattern from `battery_monitor.c` / `soil_moisture.c`:
 
 ## Flash Partitions
 
-Defined in `partitions.csv`:
-- `nvs` (24KB) — WiFi credentials, device ID
-- `phy_init` (4KB) — RF calibration
-- `factory` (2.5MB) — application firmware
-- `storage` (16KB) — reserved NVS namespace for future sensor calibration data
+Defined in `partitions.csv` — **dual-OTA layout** (explicit offsets are pinned to
+work around a PlatformIO upload-offset bug; see `PARTITIONS.md` and the Zigbee OTA
+docs in `DEVELOPER_GUIDE.md`):
+- `nvs` (24KB, @0x9000) — WiFi credentials, device ID, soil calibration
+- `phy_init` (4KB, @0xf000) — RF calibration
+- `otadata` (8KB, @0x10000) — selects the active OTA slot
+- `ota_0` (1.5MB, @0x20000) — application slot A
+- `ota_1` (1.5MB, @0x1a0000) — application slot B (OTA target)
+- `storage` (16KB, @0x320000) — reserved NVS namespace
+- `zb_storage` (16KB, fat, @0x324000) / `zb_fct` (1KB, fat, @0x328000) — Zigbee stack NVRAM
+
+The single `factory` partition was replaced by `ota_0`/`ota_1` + `otadata` to
+enable Zigbee OTA with bootloader rollback (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`).
 
 ## Provisioning Flow
 

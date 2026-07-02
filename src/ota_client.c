@@ -1,0 +1,278 @@
+#ifdef USE_ZIGBEE
+#include "ota_client.h"
+#include "ota_ids.h"
+#include "fw_version.h"
+#include "esp_zigbee_core.h"
+#include "esp_zigbee_ota.h"
+#include "zcl/esp_zigbee_zcl_command.h"  /* esp_zb_zcl_ota_upgrade_value_message_t */
+#include "zcl/esp_zigbee_zcl_ota.h"      /* ESP_ZB_ZCL_ATTR_OTA_UPGRADE_* attr ids */
+#include "zdo/esp_zigbee_zdo_command.h"  /* esp_zb_zdo_match_cluster, match_desc_req_param_t */
+#include "esp_ota_ops.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/timers.h"
+#include "zigbee_reporter.h"
+
+static const char *TAG = "OTA_CLI";
+#define OTA_QUERY_INTERVAL_MIN  30   /* periodic image-query fallback (device-initiated) */
+#define OTA_HW_VERSION          1    /* advertised hardware version */
+#define OTA_MAX_DATA_SIZE       223  /* max OTA image block payload (ZCL max) */
+
+/* ---- OTA download state (single in-flight upgrade) ---- */
+static const esp_partition_t *s_ota_part = NULL;
+static esp_ota_handle_t       s_ota_handle = 0;
+static bool                   s_ota_in_progress = false;
+static uint32_t               s_ota_received = 0;   /* bytes of the .ota file seen so far */
+
+/* The esp-zigbee stack parses + strips the 56-byte Zigbee OTA header before
+ * invoking this callback, so msg->payload begins at the sub-element (tag u16 +
+ * length u32 = 6 bytes), then the actual ESP app image (magic 0xE9). We skip the
+ * 6-byte sub-element header from the payload STREAM so only the app image reaches
+ * esp_ota_write. (Confirmed empirically: the first delivered byte is 0x00 = the
+ * sub-element tag, not 0x1E = the OTA file magic, which would mean no stripping.) */
+#define OTA_IMAGE_SKIP_BYTES  6
+
+/* ---- Burst mode + stall watchdog ----
+ * During a download we keep the radio up and pause periodic reports; a one-shot
+ * timer aborts the transfer if no block arrives within OTA_STALL_TIMEOUT_MS so a
+ * dead server can't leave the device stuck awake (battery drain). */
+#define OTA_STALL_TIMEOUT_MS  60000
+static TimerHandle_t s_stall_timer = NULL;
+
+/* Forward declarations — defined below, but referenced by ota_stall_cb and
+ * ota_client_on_value (which appear before / between the definitions). */
+static void ota_client_burst_begin(void);
+static void ota_client_burst_kick(void);
+static void ota_client_burst_end(void);
+
+static void ota_stall_cb(TimerHandle_t t) {
+    (void)t;
+    ESP_LOGW(TAG, "OTA stalled — aborting, returning to sleepy mode");
+    if (esp_zb_lock_acquire(portMAX_DELAY)) {
+        if (s_ota_in_progress) { esp_ota_abort(s_ota_handle); s_ota_in_progress = false; }
+        ota_client_burst_end();   /* runs under the lock */
+        esp_zb_lock_release();
+    }
+}
+
+static void ota_client_burst_begin(void) {
+    zigbee_reporter_set_reports_paused(true);   /* no ADC/e-paper churn mid-OTA */
+    esp_zb_sleep_enable(false);                 /* no light sleep during download */
+    esp_zb_set_rx_on_when_idle(true);           /* keep receiver up for blocks */
+    if (!s_stall_timer) {
+        s_stall_timer = xTimerCreate("ota_stall", pdMS_TO_TICKS(OTA_STALL_TIMEOUT_MS),
+                                     pdFALSE, NULL, ota_stall_cb);
+    }
+    if (s_stall_timer) {
+        xTimerStart(s_stall_timer, 0);
+    } else {
+        ESP_LOGE(TAG, "stall watchdog timer unavailable — OTA proceeds unguarded");
+    }
+    ESP_LOGI(TAG, "burst mode ON");
+}
+
+static void ota_client_burst_kick(void) {
+    if (s_stall_timer) xTimerReset(s_stall_timer, 0);
+}
+
+static void ota_client_burst_end(void) {
+    if (s_stall_timer) xTimerStop(s_stall_timer, 0);
+    esp_zb_set_rx_on_when_idle(false);          /* back to sleepy ED */
+    esp_zb_sleep_enable(true);
+    zigbee_reporter_set_reports_paused(false);
+    ESP_LOGI(TAG, "burst mode OFF");
+}
+
+esp_err_t ota_client_on_value(const esp_zb_zcl_ota_upgrade_value_message_t *msg)
+{
+    switch (msg->upgrade_status) {
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_START:
+        if (s_ota_in_progress) {            /* stale/overlapping session */
+            esp_ota_abort(s_ota_handle);
+            s_ota_in_progress = false;
+        }
+        s_ota_part = esp_ota_get_next_update_partition(NULL);
+        ESP_LOGI(TAG, "OTA start -> slot %s", s_ota_part ? s_ota_part->label : "?");
+        if (!s_ota_part ||
+            esp_ota_begin(s_ota_part, OTA_SIZE_UNKNOWN, &s_ota_handle) != ESP_OK) {
+            return ESP_FAIL;
+        }
+        s_ota_in_progress = true;
+        s_ota_received = 0;
+        ota_client_burst_begin();
+        return ESP_OK;
+
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_RECEIVE: {
+        if (!s_ota_in_progress) return ESP_FAIL;
+        ota_client_burst_kick();
+
+        const uint8_t *data = msg->payload;
+        uint16_t       len  = msg->payload_size;
+
+        if (s_ota_received == 0 && len >= 8) {
+            ESP_LOGI(TAG, "OTA first payload bytes: %02x %02x %02x %02x %02x %02x %02x %02x",
+                     data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]);
+        }
+
+        /* Skip the Zigbee OTA header + sub-element header so only the app image
+         * reaches esp_ota_write. The header spans the first OTA_IMAGE_SKIP_BYTES
+         * of the file and may straddle this block. */
+        if (s_ota_received < OTA_IMAGE_SKIP_BYTES) {
+            uint32_t skip = OTA_IMAGE_SKIP_BYTES - s_ota_received;
+            if (skip >= len) {            /* whole block is still header */
+                s_ota_received += len;
+                return ESP_OK;
+            }
+            data += skip;
+            len  -= (uint16_t)skip;
+        }
+        s_ota_received += msg->payload_size;
+
+        esp_err_t werr = esp_ota_write(s_ota_handle, data, len);
+        if (werr != ESP_OK) ESP_LOGE(TAG, "esp_ota_write failed: %s", esp_err_to_name(werr));
+        return werr;
+    }
+
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_CHECK:
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_APPLY:
+        return ESP_OK;   /* allow the upgrade to proceed */
+
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_FINISH:
+        if (!s_ota_in_progress) return ESP_FAIL;
+        s_ota_in_progress = false;
+        if (esp_ota_end(s_ota_handle) != ESP_OK ||
+            esp_ota_set_boot_partition(s_ota_part) != ESP_OK) {
+            ESP_LOGE(TAG, "OTA finalize failed");
+            ota_client_burst_end();
+            return ESP_FAIL;
+        }
+        ESP_LOGI(TAG, "OTA complete — rebooting into new image");
+        ota_client_burst_end();   /* stop stall timer / restore before reboot */
+        esp_restart();
+        return ESP_OK;   /* not reached */
+
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_ABORT:
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_ERROR:
+        if (s_ota_in_progress) {
+            esp_ota_abort(s_ota_handle);
+            s_ota_in_progress = false;
+            ota_client_burst_end();
+        }
+        ESP_LOGW(TAG, "OTA aborted (status %d)", msg->upgrade_status);
+        return ESP_OK;
+
+    default:
+        /* Intentional no-op: other statuses (e.g. ESP_ZB_ZCL_OTA_UPGRADE_IMAGE_STATUS_NORMAL
+         * = 0x0008) are informational and require no action. */
+        return ESP_OK;
+    }
+}
+
+/* Single global core action handler — dispatches on callback id.
+ * No other module registers one (verified by grep); if that changes, the OTA
+ * dispatch must move into the shared handler rather than registering a second. */
+static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t cb_id, const void *message)
+{
+    if (cb_id == ESP_ZB_CORE_OTA_UPGRADE_VALUE_CB_ID) {
+        return ota_client_on_value((const esp_zb_zcl_ota_upgrade_value_message_t *)message);
+    }
+    return ESP_OK;
+}
+
+void ota_client_add_cluster(esp_zb_cluster_list_t *clusters)
+{
+    esp_zb_ota_cluster_cfg_t ota_cfg = {
+        .ota_upgrade_file_version        = FW_VERSION_U32,
+        .ota_upgrade_manufacturer        = OTA_MANUFACTURER_CODE,
+        .ota_upgrade_image_type          = OTA_IMAGE_TYPE,
+        .ota_upgrade_downloaded_file_ver = FW_VERSION_U32,
+    };
+    esp_zb_attribute_list_t *ota_attrs = esp_zb_ota_cluster_create(&ota_cfg);
+
+    /* The OTA *client* additionally requires the client-data variable (0xFFF1)
+     * plus server addr/endpoint attrs. esp_zb_ota_cluster_create() only adds the
+     * mandatory attrs; without the client variable the stack dereferences missing
+     * client state and asserts in zcl_ota_upgrade_commands.c at startup. Static
+     * storage so the values outlive this function regardless of how add_attr keeps them. */
+    static esp_zb_zcl_ota_upgrade_client_variable_t ota_var = {
+        .timer_query   = ESP_ZB_ZCL_OTA_UPGRADE_QUERY_TIMER_COUNT_DEF,
+        .hw_version    = OTA_HW_VERSION,
+        .max_data_size = OTA_MAX_DATA_SIZE,
+    };
+    static uint16_t ota_server_addr = 0xFFFF;   /* unknown — discover via the network */
+    static uint8_t  ota_server_ep   = 0xFF;     /* unknown — discover */
+    esp_zb_ota_cluster_add_attr(ota_attrs, ESP_ZB_ZCL_ATTR_OTA_UPGRADE_CLIENT_DATA_ID,     &ota_var);
+    esp_zb_ota_cluster_add_attr(ota_attrs, ESP_ZB_ZCL_ATTR_OTA_UPGRADE_SERVER_ADDR_ID,     &ota_server_addr);
+    esp_zb_ota_cluster_add_attr(ota_attrs, ESP_ZB_ZCL_ATTR_OTA_UPGRADE_SERVER_ENDPOINT_ID, &ota_server_ep);
+
+    esp_zb_cluster_list_add_ota_cluster(clusters, ota_attrs, ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE);
+    ESP_LOGI(TAG, "OTA client cluster added (fw %s = 0x%08x)",
+             FW_VERSION_STR, (unsigned)FW_VERSION_U32);
+}
+
+/* Client endpoint, captured in ota_client_start, used when arming the query. */
+static uint8_t s_app_endpoint = 0;
+
+/* ZDO match-descriptor callback: fires with the discovered OTA server's short
+ * address + endpoint. Arm periodic querying and send the first image query.
+ * NOTE arg order: esp_zb_ota_upgrade_client_query_image_req(addr_u16, ep_u8) —
+ * the header's param NAMES are swapped vs their types; addr is the uint16. */
+static void ota_find_server_cb(esp_zb_zdp_status_t status, uint16_t addr, uint8_t endpoint, void *ctx)
+{
+    (void)ctx;
+    if (status != ESP_ZB_ZDP_STATUS_SUCCESS) {
+        ESP_LOGW(TAG, "OTA server not found (zdo status %d)", status);
+        return;
+    }
+    esp_zb_ota_upgrade_client_query_interval_set(s_app_endpoint, OTA_QUERY_INTERVAL_MIN);
+    esp_zb_ota_upgrade_client_query_image_req(addr, endpoint);
+    ESP_LOGI(TAG, "OTA server @0x%04x ep %u — querying every %d min",
+             addr, endpoint, OTA_QUERY_INTERVAL_MIN);
+}
+
+void ota_client_start(uint8_t endpoint)
+{
+    s_app_endpoint = endpoint;
+    esp_zb_core_action_handler_register(zb_action_handler);
+    /* The periodic query + first image request are armed only AFTER the OTA
+     * server is discovered (ota_client_on_joined → ota_find_server_cb); the
+     * client never queries on its own without that bootstrap. */
+    ESP_LOGI(TAG, "OTA client ready (endpoint %u) — server discovery on join", endpoint);
+}
+
+void ota_client_on_joined(void)
+{
+    /* Discover the coordinator's OTA Upgrade server; ota_find_server_cb then arms
+     * the query. Called from the Zigbee signal handler on join success (stack
+     * context, lock already held — do NOT acquire the Zigbee lock here). */
+    static uint16_t cluster_list[] = { ESP_ZB_ZCL_CLUSTER_ID_OTA_UPGRADE };
+    esp_zb_zdo_match_desc_req_param_t req = {
+        .dst_nwk_addr     = 0x0000,   /* coordinator */
+        .addr_of_interest = 0x0000,
+        .profile_id       = ESP_ZB_AF_HA_PROFILE_ID,
+        .num_in_clusters  = 1,
+        .num_out_clusters = 0,
+        .cluster_list     = cluster_list,
+    };
+    esp_zb_zdo_match_cluster(&req, ota_find_server_cb, NULL);
+    ESP_LOGI(TAG, "OTA: discovering server on coordinator");
+}
+
+bool ota_client_image_pending_verify(void)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t st;
+    if (esp_ota_get_state_partition(running, &st) == ESP_OK) {
+        return st == ESP_OTA_IMG_PENDING_VERIFY;
+    }
+    return false;
+}
+
+void ota_client_mark_valid(void)
+{
+    if (ota_client_image_pending_verify()) {
+        esp_ota_mark_app_valid_cancel_rollback();
+        ESP_LOGI(TAG, "New image confirmed valid (rollback cancelled)");
+    }
+}
+#endif /* USE_ZIGBEE */

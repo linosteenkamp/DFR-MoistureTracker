@@ -11,5 +11,8 @@ include/mqtt_credentials.h
 # ESP-IDF managed components (downloaded sources; pinned via dependencies.lock)
 managed_components/
 
+# Python bytecode cache (e.g. tools/ pytest runs)
+__pycache__/
+
 # Optional: Ignore PlatformIO environment-specific config
 # platformio_override.ini

@@ -37,7 +37,7 @@ esp_err_t wifi_credentials_save(const char *ssid, const char *password);
 
 /**
  * @brief Save device ID to NVS
- * @param device_id Device identifier (e.g., "sensor02")
+ * @param device_id Device identifier (e.g., "moisture01")
  * @return ESP_OK on success, error code otherwise
  */
 esp_err_t wifi_credentials_save_device_id(const char *device_id);

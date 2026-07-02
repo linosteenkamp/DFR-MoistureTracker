@@ -25,7 +25,9 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME#v}"
           IFS=. read -r MA MI PA <<< "$TAG"
-          printf 'file_version=0x01%02X%02X%02X\n' "$MA" "$MI" "$PA" >> "$GITHUB_OUTPUT"
+          # Semver in the HIGH hex digits so z2m shows the major first: 0x<MA><MI><PA>0000
+          # (must match OTA_PACK_VERSION in include/ota_ids.h). MA/MI are single nibbles.
+          printf 'file_version=0x%X%X%02X0000\n' "$MA" "$MI" "$PA" >> "$GITHUB_OUTPUT"
           echo "semver=$TAG" >> "$GITHUB_OUTPUT"
           echo "ma=$MA" >> "$GITHUB_OUTPUT"
           echo "mi=$MI" >> "$GITHUB_OUTPUT"

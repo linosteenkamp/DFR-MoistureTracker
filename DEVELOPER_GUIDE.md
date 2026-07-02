@@ -597,10 +597,29 @@ The action:
 4. Updates `ota/index.json` (via `tools/update_ota_index.py`) and commits it to
    `master` — z2m will pick it up on its next index poll.
 
-**Version ordering**: `fileVersion` is packed as `0xMMmmppBB` (major, minor, patch,
-build). A release tag must produce a strictly larger `fileVersion` than the firmware
-currently running on the target nodes — otherwise z2m will not offer the update.
-Local dev builds default to `0x00000000`; any tagged release supersedes them.
+**Version encoding — must display correctly in z2m**: z2m renders the OTA
+`fileVersion` as its 8-character **hex string**, split `AB.CC-DE.FF`
+(`fileVersion2String`: `hex[0].hex[1].hex[2:4]-hex[4].hex[5].hex[6:8]`). To make the
+**major** the leading digit, the semver lives in the **high** hex digits:
+
+```
+OTA_PACK_VERSION(major, minor, patch) = (major & 0xF)<<28 | (minor & 0xF)<<24 | (patch & 0xFF)<<16
+  e.g. v1.0.3 → 0x10030000 → z2m shows "1.0.03-0.0.00"
+```
+
+The CI derives the same value with `printf '0x%X%X%02X0000'`; the firmware's
+`OTA_PACK_VERSION` and the CI's `file_version` **must** produce the same number.
+Constraints: major & minor are each a single hex nibble (0–15); patch is one byte
+shown in hex (patch ≥ 10 renders `0a`…); the `-0.0.00` stack suffix is normal. A
+release must produce a strictly larger `fileVersion` than the firmware on the target,
+or z2m won't offer the update — the scheme is monotonic and stays above every legacy
+`0x01xxxxxx` value. Local dev builds default to `0x00000000`; any tagged release
+supersedes them.
+
+> **History**: v1.0.2 shipped a broken packing (`0x01<MA><MI><PA>`) that z2m
+> displayed as `0.1.01-0.0.02` — the major hidden in the minor slot. Fixed in
+> **v1.0.3**; `test/test_ota_version` asserts both the packed uint32 and the exact
+> z2m display string.
 
 ### Staged rollout / canary
 

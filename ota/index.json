@@ -3,9 +3,9 @@
     "modelId": "DFR-SoilSensor",
     "manufacturerCode": 65278,
     "imageType": 1,
-    "fileVersion": 16842754,
-    "url": "https://github.com/linosteenkamp/DFR-MoistureTracker/releases/download/v1.0.2/firmware-1.0.2.ota",
+    "fileVersion": 268632064,
+    "url": "https://github.com/linosteenkamp/DFR-MoistureTracker/releases/download/v1.0.3/firmware-1.0.3.ota",
     "fileSize": 1260286,
-    "sha512": "bd4ba231a1af2bcfa01de7d0252b5c96bb95fc7d07275195a27f71b549176d70aedde87eda8d1fbc01b30a7cb34495bee22fae8727332f61db7a3d8cbe2b6d89"
+    "sha512": "ebf7a082ddff497aeed7f11653d7934ff36ab7b87141fd73de75ed91cdc099a347ca910d70d5dde43363ef89c6d93bc13b62c030c3f86e3bc7f11c72eacd0fa8"
   }
 ]

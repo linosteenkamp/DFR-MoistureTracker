@@ -44,6 +44,9 @@ module.exports = [
         model: 'DFR-SoilSensor',
         vendor: 'DFRobot-DIY',
         description: 'ESP32-C6 soil moisture + battery sensor (DIY)',
+        // Bespoke line icon (droplet + soil, teal #0e9aa7) embedded as a data-URI so
+        // it ships with the definition. Source SVG: z2m/dfr_soil_moisture.svg.
+        icon: 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjMGU5YWE3IiBzdHJva2Utd2lkdGg9IjEuNyIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj4KICA8cGF0aCBkPSJNMTIgMi41QzEyIDIuNSA3IDggNyAxMS41YTUgNSAwIDAgMCAxMCAwQzE3IDggMTIgMi41IDEyIDIuNVoiLz4KICA8cGF0aCBkPSJNMy41IDE5YzItMS4xIDQtMS4xIDYgMHM0IDEuMSA2IDAiLz4KICA8cGF0aCBkPSJNMy41IDIxLjVjMi0xLjEgNC0xLjEgNiAwczQgMS4xIDYgMCIvPgo8L3N2Zz4K',
         extend: [
             battery({
                 percentage: true,

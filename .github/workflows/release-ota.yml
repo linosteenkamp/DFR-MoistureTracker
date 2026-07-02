@@ -33,7 +33,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
+          python-version: '3.13'   # pioarduino platform requires Python 3.10–3.13 (3.x picks 3.14, rejected)
       - run: pip install platformio pytest
 
       - name: Unit tests (host tools + native)
